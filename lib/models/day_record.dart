@@ -41,6 +41,7 @@ class DayRecord {
   DayRecord({
     required this.date,
     this.sleepMin,
+    this.napMin,
     this.deep,
     this.rem,
     this.light,
@@ -57,7 +58,13 @@ class DayRecord {
   }) : meals = meals ?? <Meal>[];
 
   final String date;
+
+  /// Total time asleep for the day, the way Google Health counts it (naps included unless
+  /// switched off in Data check).
   double? sleepMin;
+
+  /// Minutes of daytime naps that ended on this day (already inside [sleepMin] when counted).
+  double? napMin;
   double? deep;
   double? rem;
   double? light;
@@ -139,6 +146,7 @@ class DayRecord {
   Map<String, dynamic> toJson() => {
         'date': date,
         if (sleepMin != null) 'sleepMin': sleepMin,
+        if (napMin != null) 'napMin': napMin,
         if (deep != null) 'deep': deep,
         if (rem != null) 'rem': rem,
         if (light != null) 'light': light,
@@ -159,6 +167,7 @@ class DayRecord {
     return DayRecord(
       date: j['date'] as String,
       sleepMin: d('sleepMin'),
+      napMin: d('napMin'),
       deep: d('deep'),
       rem: d('rem'),
       light: d('light'),

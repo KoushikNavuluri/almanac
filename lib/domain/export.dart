@@ -7,7 +7,7 @@ String _csvCell(String v) => v.contains(',') || v.contains('"') || v.contains('\
 
 String recordsCsv(List<DayRecord> records) {
   const cols = [
-    'date', 'sleep_min', 'deep_min', 'rem_min', 'light_min', 'awake_min', 'bedtime', 'wake_time',
+    'date', 'sleep_min', 'nap_min', 'deep_min', 'rem_min', 'light_min', 'awake_min', 'bedtime', 'wake_time',
     'hrv_ms', 'resting_hr_bpm', 'spo2_pct', 'breaths_per_min', 'steps', 'kcal', 'protein_g', 'last_meal', 'meals',
   ];
   String n(double? v, [int dp = 0]) => v == null ? '' : v.toStringAsFixed(dp);
@@ -16,6 +16,7 @@ String recordsCsv(List<DayRecord> records) {
     lines.add([
       r.date,
       n(r.sleepMin),
+      n(r.napMin),
       n(r.deep),
       n(r.rem),
       n(r.light),
