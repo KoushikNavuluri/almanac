@@ -12,6 +12,23 @@ import 'experiment_screen.dart';
 import 'metric_screen.dart';
 import 'privacy_screen.dart';
 
+/// "just now", "4 min ago", "3 h ago", "yesterday, 11:40 PM", "Mon, 12 Oct, 7:05 AM".
+String _ago(DateTime t) {
+  final now = DateTime.now();
+  final d = now.difference(t);
+  if (d.inSeconds < 60) return 'just now';
+  if (d.inMinutes < 60) return '${d.inMinutes} min ago';
+  final days = daysBetween(t, now);
+  if (days == 0) return '${d.inHours} h ago';
+  if (days == 1) return 'yesterday, ${fmtTime(t)}';
+  return '${fmtDay(t)}, ${fmtTime(t)}';
+}
+
+String _secs(Duration d) {
+  final s = d.inMilliseconds / 1000;
+  return s < 10 ? '${s.toStringAsFixed(1)} s' : '${s.round()} s';
+}
+
 class MeScreen extends StatelessWidget {
   const MeScreen({super.key});
 
@@ -21,7 +38,11 @@ class MeScreen extends StatelessWidget {
     final top = MediaQuery.of(context).padding.top;
     final ls = app.lastSync;
     final modeLine = switch (app.mode) {
-      DataMode.healthConnect => ls == null ? 'Health Connect · not synced yet' : 'Health Connect · synced ${fmtTime(ls)}',
+      DataMode.healthConnect => app.syncing
+          ? 'Health Connect · syncing…'
+          : ls == null
+              ? 'Health Connect · not synced yet'
+              : 'Health Connect · synced ${_ago(ls)}',
       DataMode.sample => 'Exploring sample data',
       DataMode.none => 'No data source yet',
     };
@@ -53,8 +74,19 @@ class MeScreen extends StatelessWidget {
           _Row(
             icon: Icons.key_rounded,
             title: 'AI & your key',
-            sub: app.hasKey ? '${app.keyVerified ? 'Gemini connected' : 'Key needs attention'} · ${app.model}${app.aiEnabled ? '' : ' · off'}' : 'Add your own Gemini API key',
+            sub: app.hasKey ? app.aiStatusLine : 'Add your own Gemini API key',
             onTap: () => Navigator.of(context).push(slideRoute(const AiSettingsScreen())),
+          ),
+          _Row(
+            icon: Icons.auto_awesome,
+            title: app.aiBusy ? 'Gemini is writing…' : 'Refresh AI insights',
+            sub: app.aiReady ? "Rewrite today's forecast and the Right now card from your latest data" : 'Needs a Gemini key, AI on, and at least one category shared',
+            onTap: app.aiReady && !app.aiBusy
+                ? () {
+                    app.retryAi();
+                    showToast(context, 'Gemini is rewriting today with your latest data', good: true);
+                  }
+                : null,
           ),
           _Row(
             icon: Icons.shield_outlined,
@@ -163,7 +195,7 @@ class MeScreen extends StatelessWidget {
           padding: const EdgeInsets.all(16),
           decoration: BoxDecoration(color: const Color(0x0F172767), borderRadius: BorderRadius.circular(18)),
           child: Text(
-            'Almanac 1.0 · No account, no servers. Your health data stays on this phone; AI features talk directly to Google Gemini with your own key and only the summaries you allow. Not a medical device and not medical advice.',
+            'Almanac · No account, no servers. Your health data stays on this phone; AI features talk directly to Google Gemini with your own key and only the summaries you allow. Not a medical device and not medical advice.',
             style: T.ui(13, color: C.muted, weight: FontWeight.w500, height: 1.55),
           ),
         ),
@@ -237,6 +269,7 @@ class _Row extends StatelessWidget {
   }
 }
 
+/// Where the data comes from, how fresh it is, and what Almanac can't read yet.
 class _SourceCard extends StatefulWidget {
   const _SourceCard();
   @override
@@ -244,7 +277,11 @@ class _SourceCard extends StatefulWidget {
 }
 
 class _SourceCardState extends State<_SourceCard> {
+  static const _catNames = {'sleep': 'Sleep', 'heart': 'Heart', 'activity': 'Steps', 'food': 'Meals'};
+  static const _order = ['sleep', 'heart', 'activity', 'food'];
+
   bool _connecting = false;
+  bool _fixing = false;
 
   Future<void> _connect() async {
     setState(() => _connecting = true);
@@ -252,11 +289,74 @@ class _SourceCardState extends State<_SourceCard> {
     if (mounted) setState(() => _connecting = false);
   }
 
+  Future<void> _fix(AppController app) async {
+    setState(() => _fixing = true);
+    await app.fixPermissions();
+    if (!mounted) return;
+    setState(() => _fixing = false);
+    final missing = app.missingPerms;
+    showToast(
+      context,
+      missing.isEmpty ? 'All set. Almanac can read everything it needs.' : 'Still missing: ${missing.join(', ')}',
+      good: missing.isEmpty,
+    );
+  }
+
+  Future<void> _syncNow(AppController app, {bool full = false}) async {
+    if (full) {
+      await app.sync(full: true);
+    } else {
+      await app.sync(deep: true);
+    }
+    if (!mounted) return;
+    final took = app.lastSyncTook;
+    if (app.syncError == null) {
+      showToast(context, 'Up to date · read ${app.lastSyncDays} days${took != null ? ' in ${_secs(took)}' : ''}', good: true);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final app = AppScope.of(context);
-    const catNames = {'sleep': 'Sleep', 'heart': 'Heart', 'activity': 'Steps', 'food': 'Meals'};
     final hc = app.mode == DataMode.healthConnect;
+    final now = DateTime.now();
+    final cats = <String>[
+      for (final c in _order)
+        if (app.sources.containsKey(c) || app.latestByCategory.containsKey(c)) c,
+      for (final c in app.sources.keys)
+        if (!_order.contains(c)) c,
+    ];
+
+    // Trackers only hand data to Health Connect after their own app syncs.
+    final staleNames = <String>[];
+    DateTime? oldest;
+    if (hc) {
+      for (final c in const ['sleep', 'heart', 'activity']) {
+        final t = app.latestByCategory[c];
+        if (t == null || now.difference(t) < const Duration(hours: 26)) continue;
+        staleNames.add(_catNames[c] ?? c);
+        if (oldest == null || t.isBefore(oldest)) oldest = t;
+      }
+    }
+
+    String? syncLine;
+    if (hc) {
+      final ls = app.lastSync;
+      final took = app.lastSyncTook;
+      if (app.syncing) {
+        syncLine = 'Reading the last ${app.syncDays} days · ${app.syncDone.length} of 4 done';
+      } else if (ls != null) {
+        final span = app.lastSyncDays > 0 ? ' · last ${app.lastSyncDays} days' : '';
+        final speed = took != null ? ' in ${_secs(took)}' : '';
+        syncLine = 'Synced ${_ago(ls)}$span$speed';
+      } else {
+        syncLine = 'Not synced yet';
+      }
+    }
+
+    final missing = app.missingPerms;
+    final failed = app.failedReads.where((f) => !missing.contains(f)).toList();
+
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(16),
@@ -285,28 +385,106 @@ class _SourceCardState extends State<_SourceCard> {
           ),
           if (hc)
             Row(mainAxisSize: MainAxisSize.min, children: [
-              Container(width: 8, height: 8, decoration: const BoxDecoration(color: C.teal, shape: BoxShape.circle)),
+              Container(width: 8, height: 8, decoration: BoxDecoration(color: missing.isEmpty ? C.teal : C.amber, shape: BoxShape.circle)),
               const SizedBox(width: 6),
-              Text('Connected', style: T.ui(12, color: C.teal, weight: FontWeight.w800)),
+              Text(missing.isEmpty ? 'Connected' : 'Partial', style: T.ui(12, color: missing.isEmpty ? C.teal : C.amberInk, weight: FontWeight.w800)),
             ]),
         ]),
-        if (app.sources.isNotEmpty) ...[
+        if (syncLine != null) ...[
           const SizedBox(height: 12),
-          for (final e in app.sources.entries)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 4),
-              child: Text('${catNames[e.key] ?? e.key}: ${e.value.join(', ')}', style: T.ui(13, color: C.ink, weight: FontWeight.w600)),
+          Row(children: [
+            Icon(app.syncing ? Icons.sync_rounded : Icons.check_circle_outline_rounded, size: 16, color: C.teal),
+            const SizedBox(width: 6),
+            Expanded(child: Text(syncLine, style: T.ui(13, color: C.ink, weight: FontWeight.w700))),
+          ]),
+          if (app.syncing) ...[
+            const SizedBox(height: 8),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(999),
+              child: LinearProgressIndicator(
+                value: app.syncDone.isEmpty ? null : app.syncDone.length / 4,
+                minHeight: 4,
+                backgroundColor: C.rule,
+                color: C.teal,
+              ),
             ),
+          ],
+          const SizedBox(height: 4),
+          Text(
+            'Syncs on open, every 3 min while open and on pull-down. A 7-day repair runs daily to catch late uploads.',
+            style: T.ui(12, color: C.muted, weight: FontWeight.w500, height: 1.4),
+          ),
+        ],
+        if (cats.isNotEmpty) ...[
+          const SizedBox(height: 12),
+          for (final c in cats)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                SizedBox(width: 56, child: Text(_catNames[c] ?? c, style: T.ui(13, weight: FontWeight.w800))),
+                Expanded(
+                  child: Text(
+                    [
+                      if ((app.sources[c] ?? const <String>[]).isNotEmpty) app.sources[c]!.join(', '),
+                      if (app.latestByCategory[c] != null) 'newest ${_ago(app.latestByCategory[c]!)}',
+                    ].join(' · '),
+                    style: T.ui(13, color: C.muted, weight: FontWeight.w600, height: 1.35),
+                  ),
+                ),
+                if (app.syncing)
+                  app.syncDone.contains(c)
+                      ? const Icon(Icons.check_rounded, size: 16, color: C.teal)
+                      : const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 1.6, color: C.teal)),
+              ]),
+            ),
+        ],
+        if (staleNames.isNotEmpty && oldest != null && !app.syncing) ...[
+          const SizedBox(height: 6),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(color: C.sun.withValues(alpha: 0.35), borderRadius: BorderRadius.circular(14)),
+            child: Text(
+              'Nothing new for ${staleNames.join(', ').toLowerCase()} since ${_ago(oldest)}. Open your tracker app once: it only hands new data to Health Connect after it syncs itself.',
+              style: T.ui(13, color: C.ink, weight: FontWeight.w600, height: 1.4),
+            ),
+          ),
+        ],
+        if (hc && missing.isNotEmpty) ...[
+          const SizedBox(height: 10),
+          ErrorNote(
+            message: _fixing ? 'Opening Health Connect…' : "Almanac can't read: ${missing.join(', ')}. Those cards stay empty until you allow them.",
+            onRetry: _fixing ? null : () => _fix(app),
+            actionLabel: 'Grant access',
+          ),
+        ],
+        if (hc && failed.isNotEmpty && app.syncError == null) ...[
+          const SizedBox(height: 8),
+          Text("Last sync couldn't read: ${failed.join(', ')}.", style: T.ui(12, color: C.muted, weight: FontWeight.w600)),
         ],
         if (app.syncError != null) ...[
           const SizedBox(height: 10),
-          ErrorNote(message: app.syncError!),
+          ErrorNote(message: app.syncError!, onRetry: hc && !app.syncing ? () => app.sync(force: true) : null),
         ],
         const SizedBox(height: 14),
         Wrap(spacing: 8, runSpacing: 8, children: [
-          if (hc)
-            Pill(label: app.syncing ? 'Syncing…' : 'Sync now', icon: Icons.sync_rounded, busy: app.syncing, height: 42, onTap: () => app.sync(force: true))
-          else
+          if (hc) ...[
+            Pill(
+              label: app.syncing ? 'Syncing…' : 'Sync now',
+              icon: Icons.sync_rounded,
+              busy: app.syncing,
+              height: 42,
+              onTap: () => _syncNow(app),
+            ),
+            Pill(
+              label: 'Full resync (60 days)',
+              icon: Icons.history_rounded,
+              bg: const Color(0x14172767),
+              fg: C.navy,
+              height: 42,
+              onTap: app.syncing ? null : () => _syncNow(app, full: true),
+            ),
+          ] else
             Pill(label: 'Connect Health Connect', icon: Icons.link_rounded, bg: C.crimson, busy: _connecting, height: 42, onTap: _connect),
           if (!app.isSample)
             Pill(

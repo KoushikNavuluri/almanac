@@ -6,6 +6,7 @@ import '../theme/tokens.dart';
 import '../utils/format.dart';
 import '../widgets/charts.dart';
 import '../widgets/common.dart';
+import 'ai_settings_screen.dart';
 import 'metric_screen.dart';
 
 class ExperimentScreen extends StatefulWidget {
@@ -65,6 +66,14 @@ class _ExperimentScreenState extends State<ExperimentScreen> {
       });
     }
 
+    // The coach rewrites itself whenever the week changes (start, each check-in, the result).
+    final id = widget.id;
+    if (app.aiReady && app.coachFor(id) == null && app.coachErrorFor(id) == null && !app.isCoaching(id)) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) app.loadCoach(id);
+      });
+    }
+
     final metricInfo = metrics[info.metric]!;
     return Scaffold(
       backgroundColor: C.paper,
@@ -107,6 +116,8 @@ class _ExperimentScreenState extends State<ExperimentScreen> {
                       Text('From your own past days. Tracked metric: ${metricInfo.name}.', style: T.ui(13, color: C.card.withValues(alpha: 0.8), weight: FontWeight.w500)),
                     ]),
                   ),
+                  const SizedBox(height: 12),
+                  _CoachCard(id: id),
                   if (run == null) ...[
                     const SizedBox(height: 22),
                     Pill(
@@ -226,6 +237,77 @@ class _ExperimentScreenState extends State<ExperimentScreen> {
           ),
         ),
         Positioned.fill(child: ConfettiBurst(trigger: _confetti)),
+      ]),
+    );
+  }
+}
+
+/// Gemini reads the experiment's state (not started, day N with check-ins, or the result) next
+/// to your recent data and writes a short, specific nudge. Rewritten every time the week changes.
+class _CoachCard extends StatelessWidget {
+  const _CoachCard({required this.id});
+  final String id;
+
+  @override
+  Widget build(BuildContext context) {
+    final app = AppScope.of(context);
+    if (!app.aiReady) {
+      return PaperCard(
+        color: const Color(0x0F172767),
+        border: false,
+        onTap: () => Navigator.of(context).push(slideRoute(const AiSettingsScreen())),
+        child: Row(children: [
+          const Icon(Icons.key_rounded, size: 18, color: C.navy),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              app.hasKey
+                  ? 'AI is paused or nothing is shared, so the coach is quiet. Tap to change that.'
+                  : 'Add your Gemini key and a coach will read this week with you, day by day.',
+              style: T.ui(14, color: C.navy, height: 1.4),
+            ),
+          ),
+        ]),
+      );
+    }
+    final text = app.coachFor(id);
+    final err = app.coachErrorFor(id);
+    final busy = app.isCoaching(id);
+    return PaperCard(
+      padding: const EdgeInsets.all(18),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          const Icon(Icons.auto_awesome, size: 16, color: C.teal),
+          const SizedBox(width: 6),
+          const Expanded(child: Kicker('Your coach', color: C.teal)),
+          if (busy)
+            const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: C.teal))
+          else if (text != null)
+            Press(
+              semantics: 'Ask the coach again',
+              onTap: () => app.loadCoach(id, force: true),
+              child: const Icon(Icons.refresh_rounded, size: 18, color: C.teal),
+            ),
+        ]),
+        const SizedBox(height: 10),
+        if (text != null) ...[
+          AnimatedSwitcher(
+            duration: const Duration(milliseconds: 250),
+            child: Text(text, key: ValueKey(text), style: T.serif(16, height: 1.6)),
+          ),
+          const SizedBox(height: 8),
+          SourceBadge(gemini: true, model: app.model),
+        ] else if (err != null)
+          Row(children: [
+            Expanded(child: Text(err, style: T.ui(13, color: C.ink, height: 1.4))),
+            const SizedBox(width: 8),
+            Press(
+              onTap: () => app.loadCoach(id, force: true),
+              child: Text('Retry', style: T.ui(14, color: C.crimson, weight: FontWeight.w800)),
+            ),
+          ])
+        else
+          Text('Reading your week so far…', style: T.serif(16, color: C.muted)),
       ]),
     );
   }
