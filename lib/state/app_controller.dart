@@ -23,11 +23,14 @@ enum ConnectOutcome { connected, needsInstall, unsupported, denied, error }
 
 const _dayMetrics = {'steps', 'kcal', 'protein', 'lastMealMin'};
 
+/// Bump when the way Health Connect data is folded changes: forces one full 60-day resync.
+const _dataVersion = 3;
+
 /// Single source of truth. Everything persists locally; the Gemini key lives in secure storage.
 ///
 /// Sync: incremental (last 3 days) every 3 minutes while the app is open, on open/resume and on
 /// pull-to-refresh; a 7-day repair sync once a day catches data your tracker uploads late; the full
-/// 60-day backfill runs on first connect or on demand.
+/// 60-day backfill runs on first connect, on demand, or after you change which app to trust.
 /// AI: a daily brief (forecast, tip, discoveries, one-liner per metric), a "right now" nudge that
 /// follows the day, auto-explained metrics, an experiment coach, on-demand discoveries and a
 /// streaming chat. All refresh themselves when the data they depend on changes.
@@ -54,6 +57,9 @@ class AppController extends ChangeNotifier {
   List<DayRecord> _records = [];
   double? weightKg;
   Map<String, List<String>> sources = {};
+
+  /// Category -> the app Almanac actually uses (friendly name).
+  Map<String, String> usedSources = {};
   Map<String, DateTime> latestByCategory = {};
   List<String> missingPerms = [];
   List<String> failedReads = [];
@@ -67,6 +73,13 @@ class AppController extends ChangeNotifier {
   Set<String> syncDone = {};
   String? syncError;
   HealthAvailability? hcAvailability;
+
+  /// Which app to trust per category (Me › Data check).
+  SourcePrefs sourcePrefs = SourcePrefs();
+  DayAudit? audit;
+  bool auditing = false;
+  String? auditError;
+  DateTime? _auditDay;
 
   // ------------------------------------------------------------------ settings
 
@@ -156,7 +169,7 @@ class AppController extends ChangeNotifier {
     final t = ins.today;
     final y = t == null ? null : ins.prevOf(t);
     final ys = y?.steps;
-    final night = t == null ? null : [t.sleepMin, t.deep, t.rem, t.awake, t.hrv, t.rhr, t.spo2, t.breathing];
+    final night = t == null ? null : [t.sleepMin, t.napMin, t.deep, t.rem, t.awake, t.hrv, t.rhr, t.spo2, t.breathing];
     final yday = y == null ? null : [y.meals.length, y.lastMealMin, y.kcal?.round(), ys == null ? null : (ys / 500).round()];
     return [isoDate(DateTime.now()), _sig([night, yday, ins.nightsWithSleep]), _sig(sharing.toJson()), model].join('|');
   }
@@ -333,6 +346,7 @@ class AppController extends ChangeNotifier {
     _clearAiCache();
     _records = [];
     sources = {};
+    usedSources = {};
     latestByCategory = {};
     lastFullSync = null;
     lastDeepSync = null;
@@ -350,7 +364,7 @@ class AppController extends ChangeNotifier {
       syncError = e.message;
       notifyListeners();
     }
-    await sync(full: true);
+    await _resyncAll();
   }
 
   /// [deep] = last 7 days, [full] = all 60 days. Plain calls sync the last 3 days and are
@@ -371,6 +385,7 @@ class AppController extends ChangeNotifier {
       final res = await health.fetch(
         days: days,
         now: now,
+        prefs: sourcePrefs,
         onProgress: (c) {
           syncDone = {...syncDone, c};
           notifyListeners();
@@ -379,10 +394,16 @@ class AppController extends ChangeNotifier {
       _merge(res.records, now);
       if (res.weightKg != null) weightKg = res.weightKg;
       final merged = <String, Set<String>>{};
-      sources.forEach((k, v) => merged.putIfAbsent(k, () => <String>{}).addAll(v));
+      if (days < 60) sources.forEach((k, v) => merged.putIfAbsent(k, () => <String>{}).addAll(v));
       res.sources.forEach((k, v) => merged.putIfAbsent(k, () => <String>{}).addAll(v));
       merged.forEach((k, v) => v.remove('Sample data'));
       sources = merged.map((k, v) => MapEntry(k, v.toList()..sort()));
+      if (days == 60) {
+        usedSources = Map<String, String>.of(res.used);
+        latestByCategory = {};
+      } else {
+        usedSources = {...usedSources, ...res.used};
+      }
       res.latest.forEach((k, v) {
         final cur = latestByCategory[k];
         if (cur == null || v.isAfter(cur)) latestByCategory[k] = v;
@@ -413,6 +434,16 @@ class AppController extends ChangeNotifier {
     }
   }
 
+  /// Full 60-day resync, waiting for a sync that's already running.
+  Future<void> _resyncAll() async {
+    var guard = 0;
+    while (syncing && guard < 200) {
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      guard++;
+    }
+    await sync(full: true);
+  }
+
   /// Replaces the synced days and keeps exactly 60 days ending today.
   void _merge(List<DayRecord> fresh, DateTime now) {
     final byDate = {for (final r in _records) r.date: r};
@@ -431,6 +462,46 @@ class AppController extends ChangeNotifier {
     _ins = null;
   }
 
+  // ------------------------------------------------------------------ data check
+
+  /// Reads one day straight from Health Connect, app by app.
+  Future<void> runAudit(DateTime day) async {
+    if (mode != DataMode.healthConnect) return;
+    _auditDay = day;
+    auditing = true;
+    auditError = null;
+    notifyListeners();
+    try {
+      audit = await health.audit(day, sourcePrefs);
+    } on HealthException catch (e) {
+      auditError = e.message;
+    } catch (e) {
+      auditError = 'Could not read Health Connect ($e).';
+    } finally {
+      auditing = false;
+      notifyListeners();
+    }
+  }
+
+  /// [category] is 'sleep', 'steps' or 'heart'; [value] is 'auto', 'combined' (steps) or an app's package.
+  Future<void> setSourcePref(String category, String value) async {
+    sourcePrefs.set(category, value);
+    _persist();
+    notifyListeners();
+    await _resyncAll();
+    final d = _auditDay;
+    if (d != null) await runAudit(d);
+  }
+
+  Future<void> setCountNaps(bool v) async {
+    sourcePrefs.countNaps = v;
+    _persist();
+    notifyListeners();
+    await _resyncAll();
+    final d = _auditDay;
+    if (d != null) await runAudit(d);
+  }
+
   void useSampleData() {
     mode = DataMode.sample;
     _records = SampleData.generate(DateTime.now());
@@ -440,9 +511,11 @@ class AppController extends ChangeNotifier {
       'activity': ['Sample data'],
       'food': ['Sample data'],
     };
+    usedSources = {};
     latestByCategory = {};
     missingPerms = [];
     syncError = null;
+    audit = null;
     _clearAiCache();
     _ins = null;
     _persist();
@@ -920,6 +993,7 @@ class AppController extends ChangeNotifier {
     _records = [];
     weightKg = null;
     sources = {};
+    usedSources = {};
     latestByCategory = {};
     missingPerms = [];
     failedReads = [];
@@ -928,6 +1002,9 @@ class AppController extends ChangeNotifier {
     lastDeepSync = null;
     lastSyncTook = null;
     syncError = null;
+    sourcePrefs = SourcePrefs();
+    audit = null;
+    auditError = null;
     depth = 'simple';
     reduceMotion = false;
     tab = 0;
@@ -966,10 +1043,13 @@ class AppController extends ChangeNotifier {
     final took = lastSyncTook;
     return {
       'v': 2,
+      'dataVersion': _dataVersion,
       'onboarded': onboarded,
       'mode': mode.name,
       if (weightKg != null) 'weightKg': weightKg,
       'sources': sources,
+      'usedSources': usedSources,
+      'sourcePrefs': sourcePrefs.toJson(),
       'latest': latestByCategory.map((k, v) => MapEntry(k, v.toIso8601String())),
       'missingPerms': missingPerms,
       'failedReads': failedReads,
@@ -1007,6 +1087,8 @@ class AppController extends ChangeNotifier {
     mode = DataMode.values.firstWhere((m) => m.name == j['mode'], orElse: () => DataMode.none);
     weightKg = (j['weightKg'] as num?)?.toDouble();
     sources = ((j['sources'] as Map?) ?? const {}).map((k, v) => MapEntry(k.toString(), strings(v)));
+    usedSources = stringMap(j['usedSources']);
+    if (j['sourcePrefs'] is Map) sourcePrefs = SourcePrefs.fromJson(Map<String, dynamic>.from(j['sourcePrefs'] as Map));
     latestByCategory = {};
     ((j['latest'] as Map?) ?? const {}).forEach((k, v) {
       final t = _date(v);
@@ -1055,6 +1137,18 @@ class AppController extends ChangeNotifier {
       (k, v) => MapEntry(k.toString(), ExperimentRun.fromJson(Map<String, dynamic>.from(v as Map))),
     );
     saved = strings(j['saved']).toSet();
+
+    // Data folded by an older version: re-read all 60 days and let Gemini rewrite with the new numbers.
+    final version = (j['dataVersion'] as num?)?.toInt() ?? 0;
+    if (version < _dataVersion) {
+      lastFullSync = null;
+      lastDeepSync = null;
+      usedSources = {};
+      brief = null;
+      live = null;
+      explanations.clear();
+      coach.clear();
+    }
   }
 
   @override
