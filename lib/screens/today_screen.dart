@@ -9,6 +9,7 @@ import '../widgets/charts.dart';
 import '../widgets/common.dart';
 import '../widgets/sky.dart';
 import 'ai_settings_screen.dart';
+import 'experiment_screen.dart';
 import 'metric_screen.dart';
 
 String bestExperiment(Insights ins) {
@@ -35,20 +36,17 @@ class TodayScreen extends StatelessWidget {
     final score = ins.readiness();
     final cond = ins.condition(score);
     final top = MediaQuery.of(context).padding.top;
-    final brief = app.brief;
-    final fresh = (brief != null && brief.dataKey == app.dataKey) ? brief : null;
-    if (app.aiReady && fresh == null && !app.briefLoading && app.briefError == null && ins.today != null) {
-      WidgetsBinding.instance.addPostFrameCallback((_) => app.refreshBrief());
-    }
-    final tipTitle = fresh?.tipTitle ?? '';
-    final tipBody = fresh?.tipBody ?? '';
-    final tipModel = fresh?.model;
+    final b = app.todaysBrief;
+    final headline = (b != null && b.headline.isNotEmpty) ? b.headline : cond.line;
+    final tipTitle = b?.tipTitle ?? '';
+    final tipBody = b?.tipBody ?? '';
+    final tipModel = b?.model;
 
     return RefreshIndicator(
       color: C.crimson,
       onRefresh: () async {
-        await app.sync(force: true);
-        await app.refreshBrief(force: true);
+        await app.sync(deep: true);
+        await Future.wait([app.refreshBrief(), app.refreshLive(force: true)]);
       },
       child: ListView(
         padding: EdgeInsets.zero,
@@ -100,7 +98,16 @@ class TodayScreen extends StatelessWidget {
                       padding: const EdgeInsets.only(bottom: 6),
                       child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
                         Text(cond.label, style: T.display(34, color: C.card, height: 0.95)),
-                        Text(cond.line, style: T.serif(15, color: C.card.withValues(alpha: 0.92), style: FontStyle.italic, height: 1.3)),
+                        AnimatedSwitcher(
+                          duration: const Duration(milliseconds: 300),
+                          child: Text(
+                            headline,
+                            key: ValueKey(headline),
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: T.serif(15, color: C.card.withValues(alpha: 0.92), style: FontStyle.italic, height: 1.3),
+                          ),
+                        ),
                       ]),
                     ),
                   ),
@@ -112,10 +119,12 @@ class TodayScreen extends StatelessWidget {
             offset: const Offset(0, -16),
             child: Container(
               decoration: const BoxDecoration(color: C.paper, borderRadius: BorderRadius.vertical(top: Radius.circular(22))),
-              padding: const EdgeInsets.fromLTRB(20, 22, 20, 0),
-              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                const _DataBanner(),
-                _ForecasterNote(fresh: fresh != null),
+              padding: const EdgeInsets.fromLTRB(20, 18, 20, 0),
+              child: const Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                _SyncLine(),
+                _DataBanner(),
+                _LiveCard(),
+                _ForecasterNote(),
               ]),
             ),
           ),
@@ -171,6 +180,44 @@ class TodayScreen extends StatelessWidget {
   }
 }
 
+class _SyncLine extends StatelessWidget {
+  const _SyncLine();
+
+  @override
+  Widget build(BuildContext context) {
+    final app = AppScope.of(context);
+    if (app.mode != DataMode.healthConnect) return const SizedBox.shrink();
+    const names = {'sleep': 'sleep', 'heart': 'heart', 'food': 'meals', 'activity': 'steps'};
+    final ls = app.lastSync;
+    final took = app.lastSyncTook;
+    String text;
+    if (app.syncing) {
+      final done = app.syncDone.map((c) => '${names[c] ?? c} ✓').join('  ');
+      text = 'Syncing ${app.syncDays} days${done.isEmpty ? '…' : '  ·  $done'}';
+    } else if (ls == null) {
+      text = 'Not synced yet · tap to sync';
+    } else {
+      final secs = took == null ? '' : ' in ${(took.inMilliseconds / 1000).toStringAsFixed(1)}s';
+      text = 'Updated ${fmtTime(ls)}$secs · auto-syncs every 3 min · tap to refresh';
+    }
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 14),
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: app.syncing ? null : () => app.sync(deep: true),
+        child: Row(children: [
+          if (app.syncing)
+            const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: C.crimson))
+          else
+            const Icon(Icons.sync_rounded, size: 16, color: C.muted),
+          const SizedBox(width: 8),
+          Expanded(child: Text(text, style: T.ui(12, color: C.muted, weight: FontWeight.w700))),
+        ]),
+      ),
+    );
+  }
+}
+
 class _DataBanner extends StatelessWidget {
   const _DataBanner();
 
@@ -179,14 +226,8 @@ class _DataBanner extends StatelessWidget {
     final app = AppScope.of(context);
     final err = app.syncError;
     Widget? child;
-    if (app.syncing) {
-      child = Row(children: [
-        const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: C.crimson)),
-        const SizedBox(width: 10),
-        Text('Syncing Health Connect…', style: T.ui(14, color: C.muted)),
-      ]);
-    } else if (err != null) {
-      child = ErrorNote(message: err, onRetry: () => app.sync(force: true), actionLabel: 'Sync again');
+    if (err != null && !app.syncing) {
+      child = ErrorNote(message: err, onRetry: () => app.sync(deep: true), actionLabel: 'Sync again');
     } else if (app.isSample) {
       child = PaperCard(
         color: const Color(0x14172767),
@@ -199,10 +240,16 @@ class _DataBanner extends StatelessWidget {
           Expanded(child: Text('You are exploring sample data. Connect Health Connect in Me to see yours.', style: T.ui(14, color: C.navy, height: 1.4))),
         ]),
       );
-    } else if (app.insights.isEmpty) {
+    } else if (app.mode == DataMode.healthConnect && app.missingPerms.isNotEmpty) {
+      child = ErrorNote(
+        message: "Health Connect isn't sharing ${app.missingPerms.join(', ')} with Almanac, so those numbers will be missing.",
+        onRetry: () => app.fixPermissions(),
+        actionLabel: 'Grant access',
+      );
+    } else if (app.insights.isEmpty && !app.syncing) {
       child = ErrorNote(
         message: 'No readings yet. Make sure your tracker and meal app sync to Health Connect, then pull down to refresh.',
-        onRetry: () => app.sync(force: true),
+        onRetry: () => app.sync(full: true),
         actionLabel: 'Sync now',
       );
     }
@@ -211,14 +258,114 @@ class _DataBanner extends StatelessWidget {
   }
 }
 
-class _ForecasterNote extends StatelessWidget {
-  const _ForecasterNote({required this.fresh});
-  final bool fresh;
+class _Pulse extends StatefulWidget {
+  const _Pulse();
+  @override
+  State<_Pulse> createState() => _PulseState();
+}
+
+class _PulseState extends State<_Pulse> with SingleTickerProviderStateMixin {
+  late final AnimationController _c = AnimationController(vsync: this, duration: const Duration(milliseconds: 1400));
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (motionOff(context)) {
+      _c.stop();
+      _c.value = 1;
+    } else if (!_c.isAnimating) {
+      _c.repeat(reverse: true);
+    }
+  }
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => FadeTransition(
+        opacity: Tween<double>(begin: 0.35, end: 1).animate(_c),
+        child: Container(width: 8, height: 8, decoration: const BoxDecoration(color: C.sun, shape: BoxShape.circle)),
+      );
+}
+
+/// Gemini's "right now" note. Refreshes itself as the day moves (meals, steps, part of day).
+class _LiveCard extends StatelessWidget {
+  const _LiveCard();
 
   @override
   Widget build(BuildContext context) {
     final app = AppScope.of(context);
-    final b = fresh ? app.brief : null;
+    if (!app.aiReady) return const SizedBox.shrink();
+    final n = app.todaysLive;
+    final err = app.liveError;
+    if (n == null && !app.liveLoading && err == null) return const SizedBox.shrink();
+    const parts = {'morning': 'this morning', 'afternoon': 'this afternoon', 'evening': 'this evening', 'night': 'tonight'};
+    final metric = n?.metric;
+    final exp = n?.experiment;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 22),
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(18),
+        decoration: BoxDecoration(color: C.navy, borderRadius: BorderRadius.circular(22)),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            const _Pulse(),
+            const SizedBox(width: 8),
+            Expanded(child: Kicker('Right now · ${parts[app.daypart] ?? ''}', color: C.sun)),
+            if (app.liveLoading) const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: C.sun)),
+          ]),
+          const SizedBox(height: 10),
+          if (n != null) ...[
+            Text(n.title, style: T.display(30, color: C.card, height: 0.95)),
+            const SizedBox(height: 6),
+            AnimatedSwitcher(
+              duration: const Duration(milliseconds: 250),
+              child: Text(n.body, key: ValueKey(n.body), style: T.serif(16, color: C.card.withValues(alpha: 0.92), height: 1.55)),
+            ),
+            const SizedBox(height: 12),
+            Row(children: [
+              Expanded(
+                child: Text('Gemini · ${fmtTime(n.createdAt)}', style: T.ui(12, color: C.card.withValues(alpha: 0.7), weight: FontWeight.w700)),
+              ),
+              if (exp != null)
+                Press(
+                  onTap: () => Navigator.of(context).push(slideRoute(ExperimentScreen(id: exp))),
+                  child: Text('Try it →', style: T.ui(14, color: C.sun, weight: FontWeight.w800)),
+                )
+              else if (metric != null)
+                Press(
+                  onTap: () => Navigator.of(context).push(slideRoute(MetricScreen(metricKey: metric))),
+                  child: Text('${metrics[metric]?.name ?? 'Details'} →', style: T.ui(14, color: C.sun, weight: FontWeight.w800)),
+                ),
+            ]),
+          ] else if (app.liveLoading)
+            Text('Reading your day so far…', style: T.serif(16, color: C.card.withValues(alpha: 0.85)))
+          else if (err != null)
+            Row(children: [
+              Expanded(child: Text(err, style: T.ui(13, color: C.card, height: 1.4))),
+              const SizedBox(width: 8),
+              Press(
+                onTap: () => app.refreshLive(force: true),
+                child: Text('Retry', style: T.ui(14, color: C.sun, weight: FontWeight.w800)),
+              ),
+            ]),
+        ]),
+      ),
+    );
+  }
+}
+
+class _ForecasterNote extends StatelessWidget {
+  const _ForecasterNote();
+
+  @override
+  Widget build(BuildContext context) {
+    final app = AppScope.of(context);
+    final b = app.todaysBrief;
     final text = b != null ? (app.depth == 'nerdy' ? b.noteNerdy : b.noteSimple) : app.insights.forecasterNote(app.depth);
     final err = app.briefError;
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -236,19 +383,30 @@ class _ForecasterNote extends StatelessWidget {
         Row(children: [
           const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: C.crimson)),
           const SizedBox(width: 8),
-          Text("The forecaster is writing today's note…", style: T.ui(13, color: C.muted)),
+          Expanded(
+            child: Text(
+              b == null ? "The forecaster is writing today's note…" : 'Updating with your latest data…',
+              style: T.ui(13, color: C.muted),
+            ),
+          ),
         ])
       else
         SourceBadge(gemini: b != null, model: b?.model),
-      if (err != null) ...[
+      if (err != null && !app.briefLoading) ...[
         const SizedBox(height: 10),
-        ErrorNote(message: err, onRetry: () => app.refreshBrief(force: true)),
+        ErrorNote(message: err, onRetry: app.retryAi),
       ],
       if (!app.hasKey) ...[
         const SizedBox(height: 10),
         Press(
           onTap: () => Navigator.of(context).push(slideRoute(const AiSettingsScreen())),
           child: Text('Add your Gemini key for a personal write-up →', style: T.ui(14, color: C.crimson, weight: FontWeight.w800)),
+        ),
+      ] else if (!app.aiReady) ...[
+        const SizedBox(height: 10),
+        Press(
+          onTap: () => app.setTab(4),
+          child: Text('AI is paused or nothing is shared. Change it in Me →', style: T.ui(14, color: C.crimson, weight: FontWeight.w800)),
         ),
       ],
       const SizedBox(height: 14),
@@ -311,7 +469,10 @@ class _NightRows extends StatelessWidget {
     if (day == null || keys.every((k) => day.value(k) == null)) {
       return Padding(
         padding: const EdgeInsets.symmetric(vertical: 12),
-        child: Text('No overnight readings for last night. Wear your tracker to bed and sync in the morning.', style: T.serif(16, color: C.muted)),
+        child: Text(
+          app.syncing ? 'Reading last night from Health Connect…' : 'No overnight readings for last night yet. Your tracker may still be uploading; Almanac checks again every few minutes.',
+          style: T.serif(16, color: C.muted),
+        ),
       );
     }
     final rows = <(String, double)>[];
@@ -341,7 +502,7 @@ class _NightRows extends StatelessWidget {
               const SizedBox(width: 12),
               Expanded(
                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Text(_line(ins, rows[i].$1, rows[i].$2), style: T.ui(15, weight: FontWeight.w500, height: 1.45)),
+                  Text(app.metricLine(rows[i].$1) ?? _line(ins, rows[i].$1, rows[i].$2), style: T.ui(15, weight: FontWeight.w500, height: 1.45)),
                   const SizedBox(height: 6),
                   StatusChip(ins.status(rows[i].$1)),
                 ]),
@@ -408,13 +569,12 @@ class _DiscoveryOfTheDay extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final app = AppScope.of(context);
-    final b = app.brief;
-    final fb = (b != null && b.dataKey == app.dataKey) ? b : null;
-    final aiHeads = fb == null ? const <String>[] : fb.discoveries.map((d) => d.head).toList();
+    final b = app.todaysBrief;
+    final aiHeads = b == null ? const <String>[] : b.discoveries.map((d) => d.head).toList();
     final local = app.insights.discoveries();
     final String? head = aiHeads.isNotEmpty ? aiHeads.first : (local.isNotEmpty ? local.first.head : null);
     if (head == null) return const SizedBox.shrink();
-    final count = aiHeads.length + local.length;
+    final count = aiHeads.length + local.length + app.todaysExtra.length;
     return Padding(
       padding: const EdgeInsets.only(top: 32),
       child: PaperCard(
@@ -447,12 +607,7 @@ class _Footer extends StatelessWidget {
     final ins = app.insights;
     final t = ins.today;
     final y = t == null ? null : ins.prevOf(t);
-    final ls = app.lastSync;
-    final line1 = app.isSample
-        ? 'Sample data · nothing leaves this phone'
-        : ls == null
-            ? 'Not synced yet'
-            : 'Synced ${fmtTime(ls)} · Health Connect';
+    final line1 = app.isSample ? 'Sample data · nothing leaves this phone' : app.aiStatusLine;
     final dinner = y?.dinnerName;
     final at = y?.lastMealMin;
     return Center(

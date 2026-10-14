@@ -8,7 +8,7 @@ import '../widgets/charts.dart';
 import '../widgets/common.dart';
 import 'metric_screen.dart';
 
-/// Every number, in plain words.
+/// Every number, in plain words. With a key, each row carries Gemini's one-liner about YOUR value.
 class AlmanacScreen extends StatefulWidget {
   const AlmanacScreen({super.key});
   @override
@@ -32,10 +32,11 @@ class _AlmanacScreenState extends State<AlmanacScreen> {
     final keys = metricOrder.where((k) {
       if (needle.isEmpty) return true;
       final m = metrics[k]!;
-      return '${m.name} ${m.tag} ${m.simple} ${m.group}'.toLowerCase().contains(needle);
+      return '${m.name} ${m.tag} ${m.simple} ${m.group} ${app.metricLine(k) ?? ''}'.toLowerCase().contains(needle);
     }).toList();
     final recent = app.records.length > 30 ? app.records.sublist(app.records.length - 30) : app.records;
     final top = MediaQuery.of(context).padding.top;
+    final hasAiLines = app.todaysBrief?.metricLines.isNotEmpty ?? false;
 
     return ListView(
       padding: EdgeInsets.fromLTRB(20, top + 20, 20, 32),
@@ -43,6 +44,26 @@ class _AlmanacScreenState extends State<AlmanacScreen> {
         const Kicker('The almanac', color: C.crimson),
         const SizedBox(height: 4),
         Text('Every number, in plain words.', style: T.display(46)),
+        if (app.aiReady) ...[
+          const SizedBox(height: 8),
+          Row(children: [
+            if (app.briefLoading)
+              const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 1.6, color: C.crimson))
+            else
+              const Icon(Icons.auto_awesome, size: 14, color: C.crimson),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                app.briefLoading
+                    ? 'Gemini is reading your latest numbers…'
+                    : hasAiLines
+                        ? 'Lines marked ✦ are Gemini on your own numbers'
+                        : 'Gemini notes appear here after the next forecast',
+                style: T.ui(12, color: C.muted, weight: FontWeight.w700),
+              ),
+            ),
+          ]),
+        ],
         const SizedBox(height: 16),
         TextField(
           controller: _q,
@@ -84,45 +105,59 @@ class _AlmanacScreenState extends State<AlmanacScreen> {
                 Text(metricGroupNotes[g] ?? '', style: T.ui(12, color: C.muted)),
               ]),
             ),
-            for (final k in keys.where((k) => metrics[k]!.group == g))
-              Press(
-                onTap: () => Navigator.of(context).push(slideRoute(MetricScreen(metricKey: k))),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(vertical: 14),
-                  decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: C.rule))),
-                  child: Row(children: [
-                    Expanded(
-                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                        Row(crossAxisAlignment: CrossAxisAlignment.baseline, textBaseline: TextBaseline.alphabetic, children: [
-                          Flexible(child: Text(metrics[k]!.name, style: T.ui(16, weight: FontWeight.w800))),
-                          const SizedBox(width: 8),
-                          Text(metrics[k]!.tag.toUpperCase(), style: T.kicker(size: 11)),
-                        ]),
-                        const SizedBox(height: 2),
-                        Text(
-                          app.depth == 'nerdy' ? metrics[k]!.nerdy : metrics[k]!.simple,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: T.ui(14, color: C.muted, weight: FontWeight.w500),
-                        ),
-                        const SizedBox(height: 6),
-                        StatusChip(ins.status(k)),
-                      ]),
-                    ),
-                    const SizedBox(width: 10),
-                    Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-                      Text(
-                        '${fmtValue(k, ins.reading(k)?.value)}${metrics[k]!.unit.isEmpty ? '' : ' ${metrics[k]!.unit}'}',
-                        style: T.display(26),
-                      ),
-                      const SizedBox(height: 4),
-                      Sparkline(values: recent.map((r) => r.value(k)).toList(), width: 72, height: 22, color: C.group(g)),
-                    ]),
-                  ]),
-                ),
-              ),
+            for (final k in keys.where((k) => metrics[k]!.group == g)) _Row(metricKey: k, recent: recent, group: g),
           ],
       ],
+    );
+  }
+}
+
+class _Row extends StatelessWidget {
+  const _Row({required this.metricKey, required this.recent, required this.group});
+  final String metricKey;
+  final List<dynamic> recent;
+  final String group;
+
+  @override
+  Widget build(BuildContext context) {
+    final app = AppScope.of(context);
+    final ins = app.insights;
+    final k = metricKey;
+    final info = metrics[k]!;
+    final aiLine = app.metricLine(k);
+    final values = app.records.length > 30 ? app.records.sublist(app.records.length - 30) : app.records;
+    return Press(
+      onTap: () => Navigator.of(context).push(slideRoute(MetricScreen(metricKey: k))),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 14),
+        decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: C.rule))),
+        child: Row(children: [
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(crossAxisAlignment: CrossAxisAlignment.baseline, textBaseline: TextBaseline.alphabetic, children: [
+                Flexible(child: Text(info.name, style: T.ui(16, weight: FontWeight.w800))),
+                const SizedBox(width: 8),
+                Text(info.tag.toUpperCase(), style: T.kicker(size: 11)),
+              ]),
+              const SizedBox(height: 2),
+              Text(
+                aiLine != null ? '✦ $aiLine' : (app.depth == 'nerdy' ? info.nerdy : info.simple),
+                maxLines: aiLine != null ? 2 : 1,
+                overflow: TextOverflow.ellipsis,
+                style: T.ui(14, color: aiLine != null ? C.ink : C.muted, weight: FontWeight.w500, height: 1.35),
+              ),
+              const SizedBox(height: 6),
+              StatusChip(ins.status(k)),
+            ]),
+          ),
+          const SizedBox(width: 10),
+          Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+            Text('${fmtValue(k, ins.reading(k)?.value)}${info.unit.isEmpty ? '' : ' ${info.unit}'}', style: T.display(26)),
+            const SizedBox(height: 4),
+            Sparkline(values: values.map((r) => r.value(k)).toList(), width: 72, height: 22, color: C.group(group)),
+          ]),
+        ]),
+      ),
     );
   }
 }

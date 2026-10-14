@@ -31,7 +31,12 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) AppScope.read(context).onResume();
+    final app = AppScope.read(context);
+    if (state == AppLifecycleState.resumed) {
+      app.onResume();
+    } else if (state == AppLifecycleState.paused) {
+      app.onPause();
+    }
   }
 
   @override
@@ -90,7 +95,15 @@ class _NavBar extends StatelessWidget {
                         color: app.tab == i ? C.crimson.withValues(alpha: 0.1) : Colors.transparent,
                         borderRadius: BorderRadius.circular(999),
                       ),
-                      child: Icon(app.tab == i ? _items[i].$2 : _items[i].$1, size: 22, color: app.tab == i ? C.crimson : C.muted),
+                      child: Stack(alignment: Alignment.center, clipBehavior: Clip.none, children: [
+                        Icon(app.tab == i ? _items[i].$2 : _items[i].$1, size: 22, color: app.tab == i ? C.crimson : C.muted),
+                        if (i == 2 && app.chatBusy)
+                          const Positioned(
+                            right: 12,
+                            top: 4,
+                            child: SizedBox(width: 8, height: 8, child: CircularProgressIndicator(strokeWidth: 1.5, color: C.crimson)),
+                          ),
+                      ]),
                     ),
                     const SizedBox(height: 4),
                     Text(_items[i].$3, style: T.ui(12, color: app.tab == i ? C.crimson : C.muted, weight: FontWeight.w800)),

@@ -122,8 +122,16 @@ class _MetricScreenState extends State<MetricScreen> {
     final recs = app.records;
     final rows = recs.length > _range ? recs.sublist(recs.length - _range) : recs;
     final explanation = app.explanationFor(k);
-    final explainError = app.explainErrors[k];
+    final explainError = app.explainErrorFor(k);
     final double scale = k == 'sleepMin' ? 1 / 60 : 1.0;
+    final busy = app.isExplaining(k);
+
+    // Explanations write themselves: as soon as the screen opens, and again when the data changes.
+    if (app.aiReady && explanation == null && explainError == null && !busy) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) app.explainMetric(k);
+      });
+    }
 
     return Scaffold(
       backgroundColor: C.paper,
@@ -155,6 +163,57 @@ class _MetricScreenState extends State<MetricScreen> {
                 const SizedBox(height: 12),
                 StatusChip(ins.status(k)),
                 const SizedBox(height: 22),
+                if (app.aiReady)
+                  PaperCard(
+                    color: C.navy,
+                    border: false,
+                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Row(children: [
+                        const Icon(Icons.auto_awesome, size: 16, color: C.sun),
+                        const SizedBox(width: 6),
+                        const Expanded(child: Kicker('What yours say', color: C.sun)),
+                        if (busy)
+                          const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: C.sun))
+                        else if (explanation != null)
+                          Press(
+                            semantics: 'Rewrite explanation',
+                            onTap: () => app.explainMetric(k, force: true),
+                            child: const Icon(Icons.refresh_rounded, size: 18, color: C.sun),
+                          ),
+                      ]),
+                      const SizedBox(height: 10),
+                      if (explanation != null) ...[
+                        AnimatedSwitcher(
+                          duration: const Duration(milliseconds: 250),
+                          child: Text(explanation, key: ValueKey(explanation), style: T.serif(16.5, color: C.card, height: 1.6)),
+                        ),
+                        const SizedBox(height: 8),
+                        Text('Gemini · ${app.model}', style: T.ui(12, color: C.card.withValues(alpha: 0.7), weight: FontWeight.w700)),
+                      ] else if (explainError != null)
+                        Row(children: [
+                          Expanded(child: Text(explainError, style: T.ui(13, color: C.card, height: 1.4))),
+                          const SizedBox(width: 8),
+                          Press(
+                            onTap: () => app.explainMetric(k, force: true),
+                            child: Text('Retry', style: T.ui(14, color: C.sun, weight: FontWeight.w800)),
+                          ),
+                        ])
+                      else
+                        Text('Reading your ${info.name.toLowerCase()}…', style: T.serif(16, color: C.card.withValues(alpha: 0.85))),
+                    ]),
+                  )
+                else
+                  PaperCard(
+                    color: const Color(0x0F172767),
+                    border: false,
+                    onTap: () => Navigator.of(context).push(slideRoute(const AiSettingsScreen())),
+                    child: Row(children: [
+                      const Icon(Icons.key_rounded, size: 18, color: C.navy),
+                      const SizedBox(width: 10),
+                      Expanded(child: Text('Add your Gemini key and the forecaster will explain your own ${info.name.toLowerCase()} in plain words.', style: T.ui(14, color: C.navy, height: 1.4))),
+                    ]),
+                  ),
+                const SizedBox(height: 14),
                 PaperCard(
                   child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                     Row(children: [
@@ -172,47 +231,6 @@ class _MetricScreenState extends State<MetricScreen> {
                     ),
                   ]),
                 ),
-                const SizedBox(height: 14),
-                if (app.aiReady)
-                  PaperCard(
-                    color: const Color(0x0F172767),
-                    border: false,
-                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                      const Row(children: [
-                        Icon(Icons.auto_awesome, size: 16, color: C.crimson),
-                        SizedBox(width: 6),
-                        Kicker('What yours say', color: C.crimson),
-                      ]),
-                      const SizedBox(height: 10),
-                      if (explanation != null) ...[
-                        Text(explanation, style: T.serif(16, height: 1.6)),
-                        const SizedBox(height: 8),
-                        SourceBadge(gemini: true, model: app.model),
-                      ] else if (app.isExplaining(k))
-                        Row(children: [
-                          const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: C.crimson)),
-                          const SizedBox(width: 10),
-                          Text('Reading your ${info.name.toLowerCase()}…', style: T.ui(14, color: C.muted)),
-                        ])
-                      else
-                        Pill(label: 'Explain my numbers', icon: Icons.auto_awesome, onTap: () => app.explainMetric(k)),
-                      if (explainError != null) ...[
-                        const SizedBox(height: 10),
-                        ErrorNote(message: explainError, onRetry: () => app.explainMetric(k)),
-                      ],
-                    ]),
-                  )
-                else
-                  PaperCard(
-                    color: const Color(0x0F172767),
-                    border: false,
-                    onTap: () => Navigator.of(context).push(slideRoute(const AiSettingsScreen())),
-                    child: Row(children: [
-                      const Icon(Icons.key_rounded, size: 18, color: C.navy),
-                      const SizedBox(width: 10),
-                      Expanded(child: Text('Add your Gemini key and the forecaster will explain your own ${info.name.toLowerCase()} in plain words.', style: T.ui(14, color: C.navy, height: 1.4))),
-                    ]),
-                  ),
                 const SizedBox(height: 26),
                 Row(children: [
                   Expanded(child: Text('Yours, lately', style: T.display(30))),

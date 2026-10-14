@@ -25,6 +25,7 @@ class _AskScreenState extends State<AskScreen> {
   final _scroll = ScrollController();
   int _lastCount = 0;
   bool _lastBusy = false;
+  int _lastStream = -1;
 
   @override
   void dispose() {
@@ -41,11 +42,11 @@ class _AskScreenState extends State<AskScreen> {
     app.sendChat(text);
   }
 
-  void _scrollToEnd() {
+  void _scrollToEnd({bool jump = false}) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_scroll.hasClients) return;
       final target = _scroll.position.maxScrollExtent;
-      if (motionOff(context)) {
+      if (jump || motionOff(context)) {
         _scroll.jumpTo(target);
       } else {
         _scroll.animateTo(target, duration: const Duration(milliseconds: 320), curve: Curves.easeOutCubic);
@@ -56,11 +57,15 @@ class _AskScreenState extends State<AskScreen> {
   @override
   Widget build(BuildContext context) {
     final app = AppScope.of(context);
+    final streamLen = app.streaming?.length ?? -1;
     if (app.chat.length != _lastCount || app.chatBusy != _lastBusy) {
       _lastCount = app.chat.length;
       _lastBusy = app.chatBusy;
       _scrollToEnd();
+    } else if (streamLen != _lastStream) {
+      _scrollToEnd(jump: true);
     }
+    _lastStream = streamLen;
     final ins = app.insights;
     final top = MediaQuery.of(context).padding.top;
     ChatMessage? lastAi;
@@ -72,6 +77,7 @@ class _AskScreenState extends State<AskScreen> {
     }
     final chips = app.chatBusy ? const <String>[] : (lastAi != null && lastAi.chips.isNotEmpty ? lastAi.chips : LocalBrain.starterChips);
     final score = ins.readiness();
+    final streaming = app.streaming;
 
     return Column(children: [
       Padding(
@@ -141,7 +147,16 @@ class _AskScreenState extends State<AskScreen> {
               const SizedBox(height: 14),
               if (m.isMe) _MyBubble(m.text) else _AiMessage(m),
             ],
-            if (app.chatBusy) ...[
+            if (app.chatBusy && streaming != null && streaming.isNotEmpty) ...[
+              const SizedBox(height: 14),
+              _Bubble(text: '$streaming ▍'),
+              const SizedBox(height: 6),
+              Row(children: [
+                const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 1.6, color: C.crimson)),
+                const SizedBox(width: 8),
+                Text('Gemini is writing…', style: T.ui(12, color: C.muted, weight: FontWeight.w700)),
+              ]),
+            ] else if (app.chatBusy) ...[
               const SizedBox(height: 14),
               _Thinking(gemini: app.aiReady),
             ],
@@ -272,25 +287,30 @@ class _AiMessage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final app = AppScope.of(context);
+    final err = m.error;
+    final metric = m.metric;
+    final exp = m.experiment;
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       _Bubble(text: m.text),
       const SizedBox(height: 6),
       SourceBadge(gemini: m.source == 'gemini'),
-      if (m.error != null) ...[
+      if (err != null) ...[
         const SizedBox(height: 8),
-        ErrorNote(message: 'Gemini could not answer (${m.error}) This reply came from the phone instead.'),
+        ErrorNote(
+          message: m.source == 'gemini' ? 'Heads up: $err.' : 'Gemini could not answer ($err) This reply came from the phone instead.',
+        ),
       ],
       if (m.help != null) ...[
         const SizedBox(height: 10),
         HelpCard(emergency: m.help == 'emergency'),
       ],
-      if (m.metric != null && metrics.containsKey(m.metric)) ...[
+      if (metric != null && metrics.containsKey(metric)) ...[
         const SizedBox(height: 10),
-        _MetricMini(metric: m.metric!, app: app),
+        _MetricMini(metric: metric, app: app),
       ],
-      if (m.experiment != null && experiments.containsKey(m.experiment)) ...[
+      if (exp != null && experiments.containsKey(exp)) ...[
         const SizedBox(height: 10),
-        ExperimentCard(id: m.experiment!),
+        ExperimentCard(id: exp),
       ],
     ]);
   }
@@ -337,13 +357,13 @@ class _ThinkingState extends State<_Thinking> {
   Timer? _t;
 
   List<String> get _steps => widget.gemini
-      ? const ['Picking only what you share', 'Asking Gemini about your data', 'Writing it plainly']
+      ? const ['Picking only what you share', 'Asking Gemini about your data', 'Waiting for the first words']
       : const ['Reading your data on this phone', 'Comparing with your normal', 'Writing it plainly'];
 
   @override
   void initState() {
     super.initState();
-    _t = Timer.periodic(const Duration(milliseconds: 900), (_) {
+    _t = Timer.periodic(const Duration(milliseconds: 700), (_) {
       if (mounted && _at < _steps.length - 1) setState(() => _at++);
     });
   }

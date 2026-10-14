@@ -14,11 +14,24 @@ const _kindColor = {'Pattern': C.crimson, 'Fun fact': C.tealInk, 'Trend': C.navy
 const _kindBg = {'Pattern': C.card, 'Fun fact': C.sun, 'Trend': C.card, 'Milestone': Color(0xFFF6C48C)};
 const _filters = ['All', 'Pattern', 'Fun fact', 'Trend', 'Milestone'];
 
-/// Local discoveries plus Gemini's (when a fresh brief exists).
+/// Newest first: what Gemini just found, then today's brief, then on-device patterns.
 List<Discovery> allDiscoveries(AppController app) {
   final out = <Discovery>[];
-  final b = app.brief;
-  if (b != null && b.dataKey == app.dataKey) {
+  for (final d in app.todaysExtra) {
+    out.add(Discovery(
+      id: 'ai+${d.head.hashCode}',
+      kind: d.kind,
+      head: d.head,
+      body: d.body,
+      metric: d.metric,
+      basis: 'Found by Gemini in your last ${app.sharing.days} days',
+      ask: 'Tell me more: ${d.head}',
+      viz: SparkViz(d.metric),
+      ai: true,
+    ));
+  }
+  final b = app.todaysBrief;
+  if (b != null) {
     for (final d in b.discoveries) {
       out.add(Discovery(
         id: 'ai-${d.head.hashCode}',
@@ -26,7 +39,7 @@ List<Discovery> allDiscoveries(AppController app) {
         head: d.head,
         body: d.body,
         metric: d.metric,
-        basis: 'Written by Gemini from your last ${app.sharing.days} days',
+        basis: "Written by Gemini in today's forecast",
         ask: 'Tell me more: ${d.head}',
         viz: SparkViz(d.metric),
         ai: true,
@@ -65,6 +78,22 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
     }
   }
 
+  Future<void> _findNew(AppController app) async {
+    await app.discoverMore();
+    if (!mounted) return;
+    final e = app.moreError;
+    if (e != null) {
+      showToast(context, e);
+      return;
+    }
+    setState(() {
+      _filter = 'All';
+      _page = 0;
+    });
+    if (_pc.hasClients) _pc.jumpToPage(0);
+    showToast(context, 'Gemini found new patterns', good: true);
+  }
+
   @override
   Widget build(BuildContext context) {
     final app = AppScope.of(context);
@@ -79,10 +108,25 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
       children: [
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 20),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            const Kicker('Discover', color: C.crimson),
-            const SizedBox(height: 4),
-            Text('Things your body told us.', style: T.display(40)),
+          child: Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
+            Expanded(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                const Kicker('Discover', color: C.crimson),
+                const SizedBox(height: 4),
+                Text('Things your body told us.', style: T.display(40)),
+              ]),
+            ),
+            if (app.aiReady) ...[
+              const SizedBox(width: 10),
+              Pill(
+                label: app.moreLoading ? 'Looking' : 'Find new',
+                icon: Icons.auto_awesome,
+                bg: C.crimson,
+                height: 40,
+                busy: app.moreLoading,
+                onTap: () => _findNew(app),
+              ),
+            ],
           ]),
         ),
         const SizedBox(height: 14),
@@ -133,6 +177,10 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
                   style: T.ui(14, color: C.muted),
                   textAlign: TextAlign.center,
                 ),
+                if (app.aiReady && !app.insights.isEmpty) ...[
+                  const SizedBox(height: 14),
+                  Pill(label: 'Ask Gemini to look', icon: Icons.auto_awesome, bg: C.crimson, busy: app.moreLoading, onTap: () => _findNew(app)),
+                ],
               ]),
             ),
           )
