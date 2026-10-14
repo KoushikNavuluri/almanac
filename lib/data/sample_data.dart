@@ -44,7 +44,7 @@ class SampleData {
       final weekend = date.weekday >= 6;
       final progress = i / (days - 1);
 
-      final bedtime = (weekend ? 24 * 60 + 40 : 23 * 60 + 20) + g() * 25 + (prevLate ? 22 : 0);
+      final double bedtime = (weekend ? 1480.0 : 1400.0) + g() * 25 + (prevLate ? 22 : 0);
       final sleep = c(425 + g() * 22 + (prevSteps > 9000 ? 24 : 0) - (prevChai ? 22 : 0) - (prevLate ? 16 : 0) + (weekend ? 28 : 0), 330, 520);
       final deep = c(sleep * 0.18 + g() * 7 - (prevLate ? 20 : 0) + (prevSteps > 9000 ? 7 : 0), 30, 110);
       final rem = c(sleep * 0.22 + g() * 9, 50, 130);
@@ -56,19 +56,20 @@ class SampleData {
 
       final lateDinner = rnd.nextDouble() < (weekend || date.weekday == 5 ? 0.5 : 0.22);
       final chaiLate = rnd.nextDouble() < 0.26;
-      final steps = c((weekend ? (rnd.nextDouble() < 0.4 ? 12400 : 6200) : 8000) + progress * 900 + g() * 2100, 2400, 17500).roundToDouble();
-      final dinnerMin = lateDinner ? 22 * 60 + rnd.nextDouble() * 50 : 20 * 60 + g() * 30;
+      final double baseSteps = weekend ? (rnd.nextDouble() < 0.4 ? 12400.0 : 6200.0) : 8000.0;
+      final steps = c(baseSteps + progress * 900 + g() * 2100, 2400, 17500).roundToDouble();
+      final double dinnerMin = lateDinner ? 1320.0 + rnd.nextDouble() * 50 : 1200.0 + g() * 30;
       final dinner = lateDinner ? _heavy[rnd.nextInt(_heavy.length)] : _light[rnd.nextInt(_light.length)];
       final kcal = 1950 + g() * 200 + (lateDinner ? 260 : 0);
       final protein = c(60 + g() * 13 + (lateDinner ? 6 : 0), 32, 110);
 
       final meals = <Meal>[
-        Meal(name: _breakfast[rnd.nextInt(_breakfast.length)], minute: (8 * 60 + 30 + g() * 20).round(), kcal: (kcal * 0.24).roundToDouble(), protein: (protein * 0.25).roundToDouble()),
+        Meal(name: _breakfast[rnd.nextInt(_breakfast.length)], minute: (510 + g() * 20).round(), kcal: (kcal * 0.24).roundToDouble(), protein: (protein * 0.25).roundToDouble()),
         if (chaiLate)
-          Meal(name: 'Irani chai', minute: (16 * 60 + 30 + g() * 20).round(), kcal: 90, protein: 2, caffeine: 0.05)
+          Meal(name: 'Irani chai', minute: (990 + g() * 20).round(), kcal: 90, protein: 2, caffeine: 0.05)
         else
-          Meal(name: 'Masala chai', minute: 11 * 60, kcal: 90, protein: 2, caffeine: 0.05),
-        Meal(name: _lunch[rnd.nextInt(_lunch.length)], minute: (13 * 60 + 30 + g() * 20).round(), kcal: (kcal * 0.33).roundToDouble(), protein: (protein * 0.33).roundToDouble()),
+          Meal(name: 'Masala chai', minute: 660, kcal: 90, protein: 2, caffeine: 0.05),
+        Meal(name: _lunch[rnd.nextInt(_lunch.length)], minute: (810 + g() * 20).round(), kcal: (kcal * 0.33).roundToDouble(), protein: (protein * 0.33).roundToDouble()),
         Meal(name: dinner, minute: dinnerMin.round(), kcal: (kcal * 0.43 - 90).roundToDouble(), protein: (protein * 0.42 - 2).roundToDouble()),
       ];
 
@@ -97,32 +98,32 @@ class SampleData {
     final y = out[days - 2];
     y.steps = 5130;
     y.meals = [
-      Meal(name: 'Idli + chutney', minute: 8 * 60 + 35, kcal: 420, protein: 12),
-      Meal(name: 'Veg thali', minute: 13 * 60 + 40, kcal: 690, protein: 21),
-      Meal(name: 'Irani chai', minute: 16 * 60 + 30, kcal: 90, protein: 2, caffeine: 0.05),
-      Meal(name: 'Chicken biryani (Paradise)', minute: 22 * 60 + 40, kcal: 1180, protein: 38),
+      const Meal(name: 'Idli + chutney', minute: 515, kcal: 420, protein: 12),
+      const Meal(name: 'Veg thali', minute: 820, kcal: 690, protein: 21),
+      const Meal(name: 'Irani chai', minute: 990, kcal: 90, protein: 2, caffeine: 0.05),
+      const Meal(name: 'Chicken biryani (Paradise)', minute: 1360, kcal: 1180, protein: 38),
     ];
     final t = out[days - 1];
     t
-      ..bedtime = 24 * 60 + 25
+      ..bedtime = 1465
       ..sleepMin = 381
       ..deep = 51
       ..rem = 82
       ..awake = 49
-      ..light = 381 - 51 - 82
-      ..wake = 24 * 60 + 25 + 381 + 49
+      ..light = 248
+      ..wake = 1895
       ..hrv = 44
       ..rhr = 67
       ..spo2 = 96.3
       ..breathing = 15.1
       ..partial = true;
     final minuteNow = now.hour * 60 + now.minute;
-    final dayFrac = c((minuteNow - 7 * 60) / (15 * 60), 0.05, 1.0);
+    final dayFrac = c((minuteNow - 420) / 900, 0.05, 1.0);
     t.steps = (7800 * dayFrac).roundToDouble();
     t.meals = [
-      if (minuteNow > 8 * 60 + 40) Meal(name: 'Poha', minute: 8 * 60 + 40, kcal: 380, protein: 9),
-      if (minuteNow > 11 * 60) Meal(name: 'Masala chai', minute: 11 * 60, kcal: 90, protein: 2, caffeine: 0.05),
-      if (minuteNow > 13 * 60 + 20) Meal(name: 'Veg thali', minute: 13 * 60 + 20, kcal: 760, protein: 26),
+      if (minuteNow > 520) const Meal(name: 'Poha', minute: 520, kcal: 380, protein: 9),
+      if (minuteNow > 660) const Meal(name: 'Masala chai', minute: 660, kcal: 90, protein: 2, caffeine: 0.05),
+      if (minuteNow > 800) const Meal(name: 'Veg thali', minute: 800, kcal: 760, protein: 26),
     ];
 
     // A clean best night 17 days ago, worth remembering.
@@ -131,7 +132,7 @@ class SampleData {
       ..deep = 104
       ..rem = 118
       ..awake = 22
-      ..light = 484 - 104 - 118
+      ..light = 262
       ..hrv = 63
       ..rhr = 60;
     return out;
