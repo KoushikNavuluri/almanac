@@ -55,12 +55,13 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
   }
 
   void _go(int delta, int count) {
-    if (count == 0) return;
-    final next = (_page + delta) % count;
+    if (count == 0 || !_pc.hasClients) return;
+    var next = (_page + delta) % count;
+    if (next < 0) next += count;
     if (motionOff(context)) {
-      _pc.jumpToPage(next < 0 ? next + count : next);
+      _pc.jumpToPage(next);
     } else {
-      _pc.animateToPage(next < 0 ? next + count : next, duration: const Duration(milliseconds: 380), curve: Curves.easeOutCubic);
+      _pc.animateToPage(next, duration: const Duration(milliseconds: 380), curve: Curves.easeOutCubic);
     }
   }
 
@@ -69,8 +70,8 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
     final app = AppScope.of(context);
     final all = allDiscoveries(app);
     final list = _filter == 'All' ? all : all.where((d) => d.kind == _filter).toList();
-    final idx = list.isEmpty ? 0 : _page.clamp(0, list.length - 1);
-    final card = list.isEmpty ? null : list[idx];
+    final int idx = list.isEmpty ? 0 : (_page >= list.length ? list.length - 1 : _page);
+    final Discovery? card = list.isEmpty ? null : list[idx];
     final top = MediaQuery.of(context).padding.top;
 
     return ListView(
@@ -118,7 +119,7 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
           ),
         ),
         const SizedBox(height: 18),
-        if (list.isEmpty)
+        if (card == null)
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 20),
             child: Container(
@@ -128,9 +129,7 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
                 Text(all.isEmpty ? 'Still gathering clues.' : 'Nothing in this drawer yet.', style: T.display(28), textAlign: TextAlign.center),
                 const SizedBox(height: 6),
                 Text(
-                  all.isEmpty
-                      ? 'Discoveries appear after about a week of synced nights and meals.'
-                      : 'Try another filter.',
+                  all.isEmpty ? 'Discoveries appear after about a week of synced nights and meals.' : 'Try another filter.',
                   style: T.ui(14, color: C.muted),
                   textAlign: TextAlign.center,
                 ),
@@ -147,8 +146,10 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
               itemBuilder: (context, i) => AnimatedBuilder(
                 animation: _pc,
                 builder: (context, child) {
-                  var delta = 0.0;
-                  if (_pc.hasClients && _pc.position.haveDimensions) delta = (_pc.page ?? 0) - i;
+                  double delta = 0;
+                  if (_pc.hasClients && _pc.position.haveDimensions) {
+                    delta = (_pc.page ?? 0.0) - i;
+                  }
                   return Transform.rotate(
                     angle: -delta * 0.08,
                     child: Transform.scale(scale: 1 - delta.abs() * 0.06, child: child),
@@ -168,7 +169,7 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
               _Round(icon: Icons.chevron_left_rounded, label: 'Previous discovery', onTap: () => _go(-1, list.length)),
               const Spacer(),
               Pill(
-                label: app.isSaved(card!.id) ? 'Saved' : 'Save',
+                label: app.isSaved(card.id) ? 'Saved' : 'Save',
                 icon: app.isSaved(card.id) ? Icons.bookmark_rounded : Icons.bookmark_border_rounded,
                 bg: C.card,
                 fg: C.navy,
@@ -179,19 +180,7 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
                 },
               ),
               const SizedBox(width: 8),
-              if (card.experiment != null)
-                Pill(
-                  label: 'Try it',
-                  icon: Icons.science_outlined,
-                  bg: C.crimson,
-                  onTap: () => Navigator.of(context).push(slideRoute(ExperimentScreen(id: card.experiment!))),
-                )
-              else
-                Pill(
-                  label: 'Ask',
-                  icon: Icons.chat_bubble_outline_rounded,
-                  onTap: () => app.ask(card.ask ?? 'Tell me more about ${card.head}'),
-                ),
+              _ActionPill(card: card, app: app),
               const Spacer(),
               _Round(icon: Icons.chevron_right_rounded, label: 'Next discovery', dark: true, onTap: () => _go(1, list.length)),
             ]),
@@ -199,12 +188,36 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
           const SizedBox(height: 14),
           Center(
             child: Text(
-              'Swipe the card. ${app.records.length} days, ${app.records.isEmpty ? '' : fmtDate(app.records.first.date)} to today.',
+              app.records.isEmpty ? 'Swipe the card.' : 'Swipe the card. ${app.records.length} days, ${fmtDate(app.records.first.date)} to today.',
               style: T.ui(12, color: C.muted, weight: FontWeight.w500),
             ),
           ),
         ],
       ],
+    );
+  }
+}
+
+class _ActionPill extends StatelessWidget {
+  const _ActionPill({required this.card, required this.app});
+  final Discovery card;
+  final AppController app;
+
+  @override
+  Widget build(BuildContext context) {
+    final exp = card.experiment;
+    if (exp != null) {
+      return Pill(
+        label: 'Try it',
+        icon: Icons.science_outlined,
+        bg: C.crimson,
+        onTap: () => Navigator.of(context).push(slideRoute(ExperimentScreen(id: exp))),
+      );
+    }
+    return Pill(
+      label: 'Ask',
+      icon: Icons.chat_bubble_outline_rounded,
+      onTap: () => app.ask(card.ask ?? 'Tell me more about ${card.head}'),
     );
   }
 }
@@ -236,6 +249,8 @@ class _ClippingCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final kindColor = _kindColor[d.kind] ?? C.crimson;
+    final viz = d.viz;
+    final basis = d.basis.isEmpty ? 'your data' : d.basis[0].toLowerCase() + d.basis.substring(1);
     return Press(
       onTap: () => Navigator.of(context).push(slideRoute(MetricScreen(metricKey: d.metric))),
       child: Container(
@@ -267,12 +282,12 @@ class _ClippingCard extends StatelessWidget {
             child: Text(d.body, style: T.serif(16), maxLines: 5, overflow: TextOverflow.ellipsis),
           ),
           const Spacer(),
-          if (d.viz != null) Padding(padding: const EdgeInsets.fromLTRB(20, 0, 20, 16), child: VizView(viz: d.viz!)),
+          if (viz != null) Padding(padding: const EdgeInsets.fromLTRB(20, 0, 20, 16), child: VizView(viz: viz)),
           Container(
             width: double.infinity,
             padding: const EdgeInsets.fromLTRB(20, 12, 20, 14),
             decoration: const BoxDecoration(border: Border(top: BorderSide(color: Color(0x40172767)))),
-            child: Text('Based on ${d.basis.isEmpty ? 'your data' : d.basis[0].toLowerCase() + d.basis.substring(1)}', style: T.ui(12, color: C.muted, weight: FontWeight.w600)),
+            child: Text('Based on $basis', style: T.ui(12, color: C.muted, weight: FontWeight.w600)),
           ),
         ]),
       ),
@@ -285,7 +300,7 @@ class VizView extends StatelessWidget {
   final Viz viz;
 
   Widget _bar(double frac, Color c, int delayMs) => TweenAnimationBuilder<double>(
-        tween: Tween(begin: 0, end: frac.clamp(0.0, 1.0).toDouble()),
+        tween: Tween<double>(begin: 0, end: frac.clamp(0.0, 1.0).toDouble()),
         duration: Duration(milliseconds: 900 + delayMs),
         curve: Curves.easeOutCubic,
         builder: (_, v, __) => FractionallySizedBox(
@@ -295,14 +310,44 @@ class VizView extends StatelessWidget {
         ),
       );
 
+  Widget _lane(String label, double offset, Color c) => Padding(
+        padding: const EdgeInsets.only(bottom: 8),
+        child: Row(children: [
+          SizedBox(width: 70, child: Text(label, style: T.ui(13, weight: FontWeight.w800))),
+          Expanded(
+            child: LayoutBuilder(
+              builder: (_, box) => Container(
+                height: 24,
+                decoration: BoxDecoration(color: const Color(0x1A172767), borderRadius: BorderRadius.circular(999)),
+                child: TweenAnimationBuilder<double>(
+                  tween: Tween<double>(begin: 0, end: offset),
+                  duration: const Duration(milliseconds: 1100),
+                  curve: Curves.easeOutCubic,
+                  builder: (_, o, __) => Stack(children: [
+                    Positioned(
+                      left: box.maxWidth * o,
+                      top: 0,
+                      bottom: 0,
+                      width: box.maxWidth * 0.55,
+                      child: Container(decoration: BoxDecoration(color: c, borderRadius: BorderRadius.circular(999))),
+                    ),
+                  ]),
+                ),
+              ),
+            ),
+          ),
+        ]),
+      );
+
   @override
   Widget build(BuildContext context) {
     final v = viz;
     if (v is BarsViz) {
-      final mx = (v.a > v.b ? v.a : v.b) * 1.08;
+      final double mx = (v.a > v.b ? v.a : v.b) * 1.08;
       String f(double x) => v.decimals > 0 ? x.toStringAsFixed(v.decimals) : x.round().toString();
+      final rows = [(v.aLabel, v.a, C.coral, 0), (v.bLabel, v.b, C.teal, 120)];
       return Column(children: [
-        for (final row in [(v.aLabel, v.a, C.coral, 0), (v.bLabel, v.b, C.teal, 120)])
+        for (final row in rows)
           Padding(
             padding: const EdgeInsets.only(bottom: 10),
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -314,7 +359,7 @@ class VizView extends StatelessWidget {
               Container(
                 height: 16,
                 decoration: BoxDecoration(color: const Color(0x1A172767), borderRadius: BorderRadius.circular(999)),
-                child: _bar(mx == 0 ? 0 : row.$2 / mx, row.$3, row.$4),
+                child: _bar(mx == 0 ? 0.0 : row.$2 / mx, row.$3, row.$4),
               ),
             ]),
           ),
@@ -329,41 +374,14 @@ class VizView extends StatelessWidget {
     if (v is SparkViz) {
       final app = AppScope.of(context);
       final vals = app.records.map((r) => r.value(v.metric)).toList();
-      return LayoutBuilder(builder: (_, box) => Sparkline(values: vals, width: box.maxWidth, height: 84, stroke: 2.5, color: C.group(metrics[v.metric]?.group ?? 'Overnight')));
+      final color = C.group(metrics[v.metric]?.group ?? 'Overnight');
+      return LayoutBuilder(builder: (_, box) => Sparkline(values: vals, width: box.maxWidth, height: 84, stroke: 2.5, color: color));
     }
     if (v is ClockViz) {
-      final shift = (v.minutes / 240).clamp(0.0, 0.4).toDouble();
-      Widget lane(String label, double offset, Color c) => Padding(
-            padding: const EdgeInsets.only(bottom: 8),
-            child: Row(children: [
-              SizedBox(width: 70, child: Text(label, style: T.ui(13, weight: FontWeight.w800))),
-              Expanded(
-                child: LayoutBuilder(builder: (_, box) {
-                  return Container(
-                    height: 24,
-                    decoration: BoxDecoration(color: const Color(0x1A172767), borderRadius: BorderRadius.circular(999)),
-                    child: Stack(children: [
-                      TweenAnimationBuilder<double>(
-                        tween: Tween(begin: 0, end: offset),
-                        duration: const Duration(milliseconds: 1100),
-                        curve: Curves.easeOutCubic,
-                        builder: (_, o, __) => Positioned(
-                          left: box.maxWidth * o,
-                          top: 0,
-                          bottom: 0,
-                          width: box.maxWidth * 0.55,
-                          child: Container(decoration: BoxDecoration(color: c, borderRadius: BorderRadius.circular(999))),
-                        ),
-                      ),
-                    ]),
-                  );
-                }),
-              ),
-            ]),
-          );
+      final double shift = (v.minutes / 240).clamp(0.0, 0.4).toDouble();
       return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        lane('Tue–Fri', 0, C.navy),
-        lane('Weekend', shift, C.crimson),
+        _lane('Tue–Fri', 0, C.navy),
+        _lane('Weekend', shift, C.crimson),
         Padding(
           padding: const EdgeInsets.only(left: 70),
           child: Row(children: [
@@ -375,31 +393,30 @@ class VizView extends StatelessWidget {
       ]);
     }
     if (v is RouteViz) {
-      final total = v.nextKm ?? v.km;
-      final frac = total == 0 ? 1.0 : (v.km / total).clamp(0.0, 1.0).toDouble();
+      final double total = v.nextKm ?? v.km;
+      final double frac = total == 0 ? 1.0 : (v.km / total).clamp(0.0, 1.0).toDouble();
+      final next = v.next;
       return Column(children: [
         LayoutBuilder(builder: (_, box) {
           return SizedBox(
             height: 24,
-            child: Stack(clipBehavior: Clip.none, alignment: Alignment.centerLeft, children: [
-              Container(height: 12, decoration: BoxDecoration(color: const Color(0x1A172767), borderRadius: BorderRadius.circular(999))),
-              TweenAnimationBuilder<double>(
-                tween: Tween(begin: 0, end: frac),
-                duration: const Duration(milliseconds: 1100),
-                curve: Curves.easeOutCubic,
-                builder: (_, f, __) => Stack(clipBehavior: Clip.none, alignment: Alignment.centerLeft, children: [
-                  Container(width: box.maxWidth * f, height: 12, decoration: BoxDecoration(color: C.amber, borderRadius: BorderRadius.circular(999))),
-                  Positioned(
-                    left: (box.maxWidth * f - 12).clamp(0.0, box.maxWidth - 24).toDouble(),
-                    child: Container(
-                      width: 24,
-                      height: 24,
-                      decoration: BoxDecoration(color: C.crimson, shape: BoxShape.circle, border: Border.all(color: C.card, width: 4)),
-                    ),
+            child: TweenAnimationBuilder<double>(
+              tween: Tween<double>(begin: 0, end: frac),
+              duration: const Duration(milliseconds: 1100),
+              curve: Curves.easeOutCubic,
+              builder: (_, f, __) => Stack(clipBehavior: Clip.none, alignment: Alignment.centerLeft, children: [
+                Container(height: 12, decoration: BoxDecoration(color: const Color(0x1A172767), borderRadius: BorderRadius.circular(999))),
+                Container(width: box.maxWidth * f, height: 12, decoration: BoxDecoration(color: C.amber, borderRadius: BorderRadius.circular(999))),
+                Positioned(
+                  left: (box.maxWidth * f - 12).clamp(0.0, box.maxWidth - 24).toDouble(),
+                  child: Container(
+                    width: 24,
+                    height: 24,
+                    decoration: BoxDecoration(color: C.crimson, shape: BoxShape.circle, border: Border.all(color: C.card, width: 4)),
                   ),
-                ]),
-              ),
-            ]),
+                ),
+              ]),
+            ),
           );
         }),
         const SizedBox(height: 10),
@@ -407,9 +424,9 @@ class VizView extends StatelessWidget {
           Text('Home', style: T.ui(12, color: C.muted, weight: FontWeight.w700)),
           const Spacer(),
           Flexible(child: Text('${v.reached} ✓', style: T.ui(12, color: C.muted, weight: FontWeight.w700), overflow: TextOverflow.ellipsis)),
-          if (v.next != null) ...[
+          if (next != null) ...[
             const Spacer(),
-            Flexible(child: Text(v.next!, style: T.ui(12, color: C.muted, weight: FontWeight.w700), overflow: TextOverflow.ellipsis)),
+            Flexible(child: Text(next, style: T.ui(12, color: C.muted, weight: FontWeight.w700), overflow: TextOverflow.ellipsis)),
           ],
         ]),
       ]);

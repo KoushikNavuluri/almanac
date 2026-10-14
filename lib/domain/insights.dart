@@ -266,7 +266,9 @@ class Insights {
     }
     if (parts == 0) return null;
     if ((rec.deep ?? 999) < 60) score -= 3;
-    return score.clamp(18, 98).round();
+    if (score < 18) score = 18;
+    if (score > 98) score = 98;
+    return score.round();
   }
 
   Condition condition(int? score) {
@@ -292,8 +294,10 @@ class Insights {
       final dip = math.exp(-((t - 7.4) * (t - 7.4)) / 1.6) * (0.55 + (deepLow ? 0.2 : 0));
       final peak2 = math.exp(-((t - 10.6) * (t - 10.6)) / 5) * 0.75;
       final fall = 1 / (1 + math.exp((t - 15.5) * 1.1));
-      final v = (rise * 0.45 + peak1 * 0.4 + peak2 * 0.35 - dip * 0.35) * fall * amp;
-      pts.add(EnergyPoint(h, v.clamp(0.05, 1.0).toDouble()));
+      var v = (rise * 0.45 + peak1 * 0.4 + peak2 * 0.35 - dip * 0.35) * fall * amp;
+      if (v < 0.05) v = 0.05;
+      if (v > 1) v = 1;
+      pts.add(EnergyPoint(h, v));
     }
     EnergyPoint pick(bool Function(EnergyPoint) where, bool max) =>
         pts.where(where).reduce((a, b) => max ? (b.v > a.v ? b : a) : (b.v < a.v ? b : a));
@@ -381,9 +385,14 @@ class Insights {
 
   DayRecord? get bestNight {
     DayRecord? best;
+    double bestSleep = -1;
     for (final r in history) {
-      if (r.sleepMin == null) continue;
-      if (best == null || r.sleepMin! > best.sleepMin!) best = r;
+      final s = r.sleepMin;
+      if (s == null) continue;
+      if (s > bestSleep) {
+        best = r;
+        bestSleep = s;
+      }
     }
     return best;
   }
@@ -412,19 +421,24 @@ class Insights {
     final gap = (sleep - s.mean).round();
     final y = prevOf(t);
     final causes = <String>[];
-    if (y != null && y.lateDinner) {
-      final name = y.dinnerName;
-      causes.add('dinner at ${fmtClock(y.lastMealMin!)}${name != null ? ' ($name)' : ''}');
+    if (y != null) {
+      final lm = y.lastMealMin;
+      if (y.lateDinner && lm != null) {
+        final name = y.dinnerName;
+        causes.add('dinner at ${fmtClock(lm)}${name != null ? ' ($name)' : ''}');
+      }
+      if (y.caffeineLate) causes.add('caffeine after 4 PM');
+      final st = y.steps;
+      if (st != null && st < 5500) causes.add('a quiet ${fmtInt(st)}-step day');
     }
-    if (y != null && y.caffeineLate) causes.add('caffeine after 4 PM');
-    if (y != null && y.steps != null && y.steps! < 5500) causes.add('a quiet ${fmtInt(y.steps!)}-step day');
     final dip = fmtClock(energyCurve().dip.h * 60);
+    final deep = t.deep, hrv = t.hrv, rhr = t.rhr;
 
     if (depth == 'nerdy') {
       final parts = <String>['TST ${fmtDur(sleep)} (${signed(gap)} min vs 30-day mean)'];
-      if (t.deep != null && d.ok) parts.add('N3 ${t.deep!.round()} min (${signed(t.deep! - d.mean)})');
-      if (t.hrv != null && h.ok) parts.add('RMSSD ${t.hrv!.round()} ms (${signed(t.hrv! - h.mean)})');
-      if (t.rhr != null && r.ok) parts.add('RHR ${t.rhr!.round()} bpm (${signed(t.rhr! - r.mean)})');
+      if (deep != null && d.ok) parts.add('N3 ${deep.round()} min (${signed(deep - d.mean)})');
+      if (hrv != null && h.ok) parts.add('RMSSD ${hrv.round()} ms (${signed(hrv - h.mean)})');
+      if (rhr != null && r.ok) parts.add('RHR ${rhr.round()} bpm (${signed(rhr - r.mean)})');
       final cause = causes.isNotEmpty ? ' Likely contributors: ${causes.join(' and ')}.' : '';
       return '${parts.join(', ')}.$cause Expect the post-lunch trough near $dip.';
     }
@@ -437,7 +451,6 @@ class Insights {
     } else {
       b.write('You slept about your usual ${fmtDur(sleep)}');
     }
-    final deep = t.deep;
     if (deep != null && d.ok && deep < d.mean - d.sd * 0.6) {
       b.write(', and deep sleep took the hit.');
     } else if (deep != null && d.ok && deep > d.mean + d.sd * 0.6) {
@@ -464,10 +477,14 @@ class Insights {
     final ld = lateDinnerDeep;
     if (ld.ok && ld.diff < -5) {
       final hrv = lateDinnerHrv;
+      final hrvBit = hrv.ok && hrv.diff < -1 ? ', and your calm reserve drops ${(-hrv.diff).round()} ms' : '';
       out.add(Discovery(
-        id: 'late-dinner', kind: 'Pattern', metric: 'deep', experiment: 'kitchen',
+        id: 'late-dinner',
+        kind: 'Pattern',
+        metric: 'deep',
+        experiment: 'kitchen',
         head: 'Late dinners cost you ${(-ld.diff).round()} min of deep sleep',
-        body: 'After dinners past 10 PM your repair shift runs short${hrv.ok && hrv.diff < -1 ? ', and your calm reserve drops ${(-hrv.diff).round()} ms' : ''}.',
+        body: 'After dinners past 10 PM your repair shift runs short$hrvBit.',
         viz: BarsViz('Late dinner', ld.yes, 'Done by 10', ld.no, 'min deep'),
         basis: '${ld.nYes} late nights vs ${ld.nNo} earlier ones',
         ask: 'Does late dinner hurt my sleep?',
@@ -475,10 +492,15 @@ class Insights {
     }
     if (rhrDays30 >= 7) {
       final scaled = beats30 * 30 / rhrDays30;
+      final t = today;
+      final br = t?.breathing, sl = t?.sleepMin;
+      final breaths = br != null && sl != null ? ' Last night you also took about ${fmtInt(br * sl)} breaths without thinking once.' : '';
       out.add(Discovery(
-        id: 'heartbeats', kind: 'Fun fact', metric: 'rhr',
+        id: 'heartbeats',
+        kind: 'Fun fact',
+        metric: 'rhr',
         head: 'Your heart beat about ${(scaled / 1e6).toStringAsFixed(1)} million times this month',
-        body: 'No breaks, no weekends.${today?.breathing != null && today?.sleepMin != null ? ' Last night you also took about ${fmtInt(today!.breathing! * today!.sleepMin!)} breaths without thinking once.' : ''}',
+        body: 'No breaks, no weekends.$breaths',
         viz: BigViz(fmtInt(scaled), 'beats in 30 days (estimated)'),
         basis: 'Resting heart rate + typical daytime lift, last 30 days',
         ask: 'Tell me a fun fact about my heart',
@@ -488,7 +510,9 @@ class Insights {
     if (tr != null && tr.pct.abs() >= 3) {
       final up = tr.pct > 0;
       out.add(Discovery(
-        id: 'hrv-trend', kind: 'Trend', metric: 'hrv',
+        id: 'hrv-trend',
+        kind: 'Trend',
+        metric: 'hrv',
         head: 'Your calm reserve is ${up ? 'up' : 'down'} ${tr.pct.abs().round()}% in 8 weeks',
         body: up
             ? 'From ${tr.a.round()} to ${tr.b.round()} ms. Your body is bouncing back faster than it used to.'
@@ -502,7 +526,10 @@ class Insights {
     if (jl != null && jl >= 30) {
       final place = jetLagPlace(jl);
       out.add(Discovery(
-        id: 'jetlag', kind: 'Fun fact', metric: 'rem', experiment: 'weekend',
+        id: 'jetlag',
+        kind: 'Fun fact',
+        metric: 'rem',
+        experiment: 'weekend',
         head: 'Every weekend you fly to $place',
         body: 'Your sleep shifts ${jl.round()} min later on weekends. Monday morning pays the jet lag.',
         viz: ClockViz(jl),
@@ -513,7 +540,10 @@ class Insights {
     final bd = bigDaySleep;
     if (bd.ok && bd.diff > 8) {
       out.add(Discovery(
-        id: 'big-day', kind: 'Pattern', metric: 'sleepMin', experiment: 'walk',
+        id: 'big-day',
+        kind: 'Pattern',
+        metric: 'sleepMin',
+        experiment: 'walk',
         head: '9k-step days buy you ${bd.diff.round()} extra minutes of sleep',
         body: 'Move more in the day, sleep longer at night. Your body keeps that deal most of the time.',
         viz: BarsViz('9k+ day', bd.yes / 60, 'Quieter day', bd.no / 60, 'h sleep', decimals: 1),
@@ -523,10 +553,14 @@ class Insights {
     }
     if (km >= 20) {
       final w = walkedTo;
+      final nk = w.nextKm;
+      final nextBit = w.next != null && nk != null ? ' ${w.next} is ${(nk - km).round()} km away.' : '';
       out.add(Discovery(
-        id: 'walked', kind: 'Milestone', metric: 'steps',
+        id: 'walked',
+        kind: 'Milestone',
+        metric: 'steps',
         head: "You've walked as far as ${w.reached}",
-        body: '${km.round()} km on foot, one errand at a time.${w.next != null ? ' ${w.next} is ${(w.nextKm! - km).round()} km away.' : ''}',
+        body: '${km.round()} km on foot, one errand at a time.$nextBit',
         viz: RouteViz(km, w.reached, w.next, w.nextKm),
         basis: '${fmtInt(stepsTotal)} steps × a 76 cm stride',
         ask: 'How much should I walk?',
@@ -535,7 +569,10 @@ class Insights {
     final ch = chaiSleep;
     if (ch.ok && ch.diff < -8) {
       out.add(Discovery(
-        id: 'chai', kind: 'Pattern', metric: 'sleepMin', experiment: 'chai',
+        id: 'chai',
+        kind: 'Pattern',
+        metric: 'sleepMin',
+        experiment: 'chai',
         head: 'Caffeine after 4 PM trims ${(-ch.diff).round()} min off your night',
         body: 'Caffeine is still half-working 5 hours later. Your late-caffeine nights run short more often than not.',
         viz: BarsViz('Late caffeine', ch.yes / 60, 'None late', ch.no / 60, 'h sleep', decimals: 1),
@@ -545,7 +582,9 @@ class Insights {
     }
     if (remHours30 >= 5) {
       out.add(Discovery(
-        id: 'dreams', kind: 'Fun fact', metric: 'rem',
+        id: 'dreams',
+        kind: 'Fun fact',
+        metric: 'rem',
         head: 'You spent ${remHours30.round()} hours dreaming this month',
         body: "That's a full season of a show, watched with your eyes closed. REM is where your brain sorts the day.",
         viz: BigViz('${remHours30.round()}h', 'of REM in 30 days'),
@@ -554,13 +593,17 @@ class Insights {
       ));
     }
     final best = bestNight;
-    if (best != null && nightsWithSleep >= 14) {
+    final bestSleep = best?.sleepMin;
+    if (best != null && bestSleep != null && nightsWithSleep >= 14) {
       final before = prevOf(best)?.dinnerName;
+      final bd2 = best.deep;
       out.add(Discovery(
-        id: 'best-night', kind: 'Milestone', metric: 'sleepMin',
+        id: 'best-night',
+        kind: 'Milestone',
+        metric: 'sleepMin',
         head: 'Your best night: ${fmtDate(best.date, long: true)}',
-        body: '${fmtDur(best.sleepMin!)} asleep${best.deep != null ? ', ${best.deep!.round()} min of deep sleep' : ''}.${before != null ? ' Dinner the night before: $before.' : ''} Worth remembering.',
-        viz: BigViz(fmtDur(best.sleepMin!), 'asleep'),
+        body: '${fmtDur(bestSleep)} asleep${bd2 != null ? ', ${bd2.round()} min of deep sleep' : ''}.${before != null ? ' Dinner the night before: $before.' : ''} Worth remembering.',
+        viz: BigViz(fmtDur(bestSleep), 'asleep'),
         basis: 'Out of $nightsWithSleep nights',
         ask: 'Am I sleeping enough?',
       ));
@@ -571,17 +614,25 @@ class Insights {
   Impact? experimentImpact(String id) {
     switch (id) {
       case 'kitchen':
-        final s = lateDinnerDeep;
-        return s.ok && s.diff < 0 ? Impact((-s.diff).round(), 'min deep sleep', 'deep') : null;
+        {
+          final s = lateDinnerDeep;
+          return s.ok && s.diff < 0 ? Impact((-s.diff).round(), 'min deep sleep', 'deep') : null;
+        }
       case 'walk':
-        final s = bigDaySleep;
-        return s.ok && s.diff > 0 ? Impact(s.diff.round(), 'min sleep', 'sleepMin') : null;
+        {
+          final s = bigDaySleep;
+          return s.ok && s.diff > 0 ? Impact(s.diff.round(), 'min sleep', 'sleepMin') : null;
+        }
       case 'chai':
-        final s = chaiSleep;
-        return s.ok && s.diff < 0 ? Impact((-s.diff).round(), 'min sleep', 'sleepMin') : null;
+        {
+          final s = chaiSleep;
+          return s.ok && s.diff < 0 ? Impact((-s.diff).round(), 'min sleep', 'sleepMin') : null;
+        }
       case 'weekend':
-        final j = socialJetLagMin;
-        return j != null && j > 0 ? Impact(j.round(), 'min of weekend drift to undo', 'rem') : null;
+        {
+          final j = socialJetLagMin;
+          return j != null && j > 0 ? Impact(j.round(), 'min of weekend drift to undo', 'rem') : null;
+        }
     }
     return null;
   }
@@ -589,9 +640,9 @@ class Insights {
   ExperimentProgress progress(ExperimentRun run) {
     final info = experiments[run.id]!;
     final start = parseIso(run.start);
-    final dates = List.generate(info.days, (i) => isoDate(addDays(start, i)));
+    final dates = List<String>.generate(info.days, (i) => isoDate(addDays(start, i)));
     final elapsed = daysBetween(start, now);
-    final todayIndex = elapsed.clamp(0, info.days);
+    final int todayIndex = elapsed < 0 ? 0 : (elapsed > info.days ? info.days : elapsed);
     final answered = run.checkins.length;
     final kept = run.checkins.values.where((v) => v).length;
     final done = elapsed >= info.days || answered >= info.days;
