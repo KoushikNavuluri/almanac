@@ -477,8 +477,8 @@ class _NightRows extends StatelessWidget {
         ),
       );
     }
-    final nap = day.napMin;
-    final showNap = nap != null && nap >= 1 && app.sourcePrefs.countNaps;
+    final double nap = day.napMin ?? 0;
+    final showNap = nap >= 1 && app.sourcePrefs.countNaps;
     final rows = <(String, double)>[];
     for (final k in keys) {
       final v = day.value(k);

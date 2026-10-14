@@ -12,6 +12,9 @@ plain words, short sentences, specific numbers from THEIR data, no jargon unless
 Rules:
 - Only use numbers that appear in the data or follow directly from it. If something is missing, say so. Never invent readings.
 - Compare the person with their own normal (personal_normal_30d) first; population norms only as context.
+- Write numbers the way the app shows them: durations as hours and minutes like 5h 36m (use the "asleep" and
+  "typical" strings when present; never write "336 minutes" or decimal hours), clock times like 11:40 PM, and whole
+  numbers for steps, bpm, ms and minutes of a sleep stage. No decimals except SpO2 and breathing rate.
 - Be practical: one concrete action beats five vague ones. Indian food and daily-life context is welcome.
 - Respect the time of day (local_time, part_of_day): don't suggest a morning walk at 10 PM.
 - You are not a doctor. Never diagnose, never say a disease is likely, never suggest starting, stopping or changing medication.
@@ -113,7 +116,7 @@ Write today's forecast for me. JSON fields:
 - tip: {title: max 6 words, an action for the rest of today; body: max 30 words, why it helps me specifically}
 - discoveries: exactly 3 items {kind: Pattern | Trend | Fun fact | Milestone, head: max 10 words, a statement, body: max 35 words, metric: one of $_metricKeys}
 - fun_fact: max 30 words, a surprising true fact about my body using my numbers
-- metric_lines: for each metric key ($_metricKeys) that has data, one plain line (max 14 words) on my latest value vs my normal. Leave out keys with no data.
+- metric_lines: for each metric key ($_metricKeys) that has data, one plain line (max 14 words) on my latest value vs my typical value, durations written like 5h 36m. Leave out keys with no data.
 ''';
     final text = await client.generate(
       key: key,
