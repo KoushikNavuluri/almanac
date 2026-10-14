@@ -73,7 +73,9 @@ class HealthContext {
       final m = <String, dynamic>{'date': r.date, 'weekday': weekdayShort(r.day)};
       if (r.partial) m['day_in_progress'] = true;
       if (p.sleep) {
-        m['sleep_hours'] = _r1(r.sleepMin == null ? null : r.sleepMin! / 60);
+        m['asleep'] = r.sleepMin == null ? null : fmtDur(r.sleepMin!);
+        m['sleep_min'] = _r0(r.sleepMin);
+        m['nap_min'] = _r0(r.napMin);
         m['deep_min'] = _r0(r.deep);
         m['rem_min'] = _r0(r.rem);
         m['awake_min'] = _r0(r.awake);
@@ -106,7 +108,14 @@ class HealthContext {
       if (!allowed) return;
       final b = ins.baseline(key);
       if (!b.ok) return;
-      normal[key] = {'mean': _r1(b.mean), 'sd': _r1(b.sd), 'days': b.n, 'unit': metrics[key]?.unit ?? ''};
+      normal[key] = {
+        'typical': fmtValue(key, b.mean),
+        'typical_range': '${fmtValue(key, b.mean - b.sd)} to ${fmtValue(key, b.mean + b.sd)}',
+        'mean': _r1(b.mean),
+        'sd': _r1(b.sd),
+        'days': b.n,
+        'unit': metrics[key]?.unit ?? '',
+      };
     }
 
     norm('sleepMin', p.sleep);
@@ -143,7 +152,8 @@ class HealthContext {
       'today': isoDate(now),
       'local_time': fmtTime(now),
       'part_of_day': daypart(now),
-      'about_the_data': 'Daily aggregates from a consumer wearable and a meal-logging app via Health Connect. Estimates, not medical measurements. The last entry in days is today, still in progress.',
+      'about_the_data':
+          'Daily aggregates from the person\'s wearable (as their tracker app reports them) and a meal-logging app via Health Connect. Estimates, not medical measurements. The last entry in days is today, still in progress. Sleep for a date is the night that ended that morning, plus naps that day. Durations are given both as minutes and as text like 5h 36m; always write the text form.',
       if (score != null) 'readiness_score_0_to_100': score,
       if (score != null) 'readiness_label': ins.condition(score).label,
       if (curve != null)

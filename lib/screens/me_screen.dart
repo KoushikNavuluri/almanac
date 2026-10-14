@@ -7,6 +7,7 @@ import '../utils/format.dart';
 import '../widgets/common.dart';
 import 'ai_settings_screen.dart';
 import 'connect_flow.dart';
+import 'data_check_screen.dart';
 import 'discover_screen.dart';
 import 'experiment_screen.dart';
 import 'metric_screen.dart';
@@ -269,7 +270,7 @@ class _Row extends StatelessWidget {
   }
 }
 
-/// Where the data comes from, how fresh it is, and what Almanac can't read yet.
+/// Where the data comes from, which app Almanac trusts, how fresh it is, and what it can't read yet.
 class _SourceCard extends StatefulWidget {
   const _SourceCard();
   @override
@@ -322,10 +323,22 @@ class _SourceCardState extends State<_SourceCard> {
     final now = DateTime.now();
     final cats = <String>[
       for (final c in _order)
-        if (app.sources.containsKey(c) || app.latestByCategory.containsKey(c)) c,
+        if (app.sources.containsKey(c) || app.latestByCategory.containsKey(c) || app.usedSources.containsKey(c)) c,
       for (final c in app.sources.keys)
         if (!_order.contains(c)) c,
     ];
+
+    String catLine(String c) {
+      final used = app.usedSources[c];
+      final all = app.sources[c] ?? const <String>[];
+      final others = (c == 'food' || used == null) ? const <String>[] : all.where((s) => s != used).toList();
+      final t = app.latestByCategory[c];
+      return [
+        if (used != null) 'using $used' else if (all.isNotEmpty) all.join(', '),
+        if (others.isNotEmpty) 'ignoring ${others.join(', ')}',
+        if (t != null) 'newest ${_ago(t)}',
+      ].join(' · ');
+    }
 
     // Trackers only hand data to Health Connect after their own app syncs.
     final staleNames = <String>[];
@@ -411,7 +424,7 @@ class _SourceCardState extends State<_SourceCard> {
           ],
           const SizedBox(height: 4),
           Text(
-            'Syncs on open, every 3 min while open and on pull-down. A 7-day repair runs daily to catch late uploads.',
+            'Syncs on open, every 3 min while open and on pull-down. Steps and sleep come from your tracker, the same way Google Health counts them.',
             style: T.ui(12, color: C.muted, weight: FontWeight.w500, height: 1.4),
           ),
         ],
@@ -422,15 +435,7 @@ class _SourceCardState extends State<_SourceCard> {
               padding: const EdgeInsets.only(bottom: 6),
               child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
                 SizedBox(width: 56, child: Text(_catNames[c] ?? c, style: T.ui(13, weight: FontWeight.w800))),
-                Expanded(
-                  child: Text(
-                    [
-                      if ((app.sources[c] ?? const <String>[]).isNotEmpty) app.sources[c]!.join(', '),
-                      if (app.latestByCategory[c] != null) 'newest ${_ago(app.latestByCategory[c]!)}',
-                    ].join(' · '),
-                    style: T.ui(13, color: C.muted, weight: FontWeight.w600, height: 1.35),
-                  ),
-                ),
+                Expanded(child: Text(catLine(c), style: T.ui(13, color: C.muted, weight: FontWeight.w600, height: 1.35))),
                 if (app.syncing)
                   app.syncDone.contains(c)
                       ? const Icon(Icons.check_rounded, size: 16, color: C.teal)
@@ -475,6 +480,13 @@ class _SourceCardState extends State<_SourceCard> {
               busy: app.syncing,
               height: 42,
               onTap: () => _syncNow(app),
+            ),
+            Pill(
+              label: 'Data check',
+              icon: Icons.fact_check_outlined,
+              bg: C.crimson,
+              height: 42,
+              onTap: () => Navigator.of(context).push(slideRoute(const DataCheckScreen())),
             ),
             Pill(
               label: 'Full resync (60 days)',

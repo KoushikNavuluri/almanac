@@ -9,6 +9,7 @@ import '../widgets/charts.dart';
 import '../widgets/common.dart';
 import '../widgets/sky.dart';
 import 'ai_settings_screen.dart';
+import 'data_check_screen.dart';
 import 'experiment_screen.dart';
 import 'metric_screen.dart';
 
@@ -146,6 +147,7 @@ class TodayScreen extends StatelessWidget {
               Text('Last night, plainly.', style: T.display(38)),
               const SizedBox(height: 6),
               const _NightRows(),
+              const _MatchLink(),
               const SizedBox(height: 24),
               const _TodaySoFar(),
               if (tipBody.isNotEmpty) ...[
@@ -435,8 +437,8 @@ class _NightRows extends StatelessWidget {
         {
           if (!b.ok) return 'Asleep ${fmtDur(v)}.';
           final gap = (v - b.mean).round();
-          if (gap < -10) return 'Asleep ${fmtDur(v)}. About ${-gap} min short of your usual.';
-          if (gap > 10) return 'Asleep ${fmtDur(v)}. $gap min more than usual.';
+          if (gap < -10) return 'Asleep ${fmtDur(v)}. About ${fmtDur(-gap.toDouble())} short of your usual.';
+          if (gap > 10) return 'Asleep ${fmtDur(v)}. ${fmtDur(gap.toDouble())} more than usual.';
           return 'Asleep ${fmtDur(v)}. Right around your usual.';
         }
       case 'deep':
@@ -475,6 +477,8 @@ class _NightRows extends StatelessWidget {
         ),
       );
     }
+    final nap = day.napMin;
+    final showNap = nap != null && nap >= 1 && app.sourcePrefs.countNaps;
     final rows = <(String, double)>[];
     for (final k in keys) {
       final v = day.value(k);
@@ -503,6 +507,10 @@ class _NightRows extends StatelessWidget {
               Expanded(
                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                   Text(app.metricLine(rows[i].$1) ?? _line(ins, rows[i].$1, rows[i].$2), style: T.ui(15, weight: FontWeight.w500, height: 1.45)),
+                  if (rows[i].$1 == 'sleepMin' && showNap) ...[
+                    const SizedBox(height: 4),
+                    Text('Includes a ${fmtDur(nap)} nap, the way Google Health counts it.', style: T.ui(12.5, color: C.muted, weight: FontWeight.w600)),
+                  ],
                   const SizedBox(height: 6),
                   StatusChip(ins.status(rows[i].$1)),
                 ]),
@@ -512,6 +520,35 @@ class _NightRows extends StatelessWidget {
           ),
         ),
     ]);
+  }
+}
+
+/// A direct way to check the numbers against Google Health.
+class _MatchLink extends StatelessWidget {
+  const _MatchLink();
+
+  @override
+  Widget build(BuildContext context) {
+    final app = AppScope.of(context);
+    if (app.mode != DataMode.healthConnect) return const SizedBox.shrink();
+    final used = app.usedSources['sleep'] ?? app.usedSources['activity'];
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
+      child: Press(
+        onTap: () => Navigator.of(context).push(slideRoute(const DataCheckScreen())),
+        child: Row(children: [
+          const Icon(Icons.fact_check_outlined, size: 16, color: C.crimson),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              used == null ? 'Compare with Google Health' : 'From $used · compare app by app',
+              style: T.ui(14, color: C.crimson, weight: FontWeight.w800),
+            ),
+          ),
+          const Icon(Icons.arrow_forward_rounded, size: 16, color: C.crimson),
+        ]),
+      ),
+    );
   }
 }
 
