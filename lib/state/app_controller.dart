@@ -13,6 +13,7 @@ import '../data/local_store.dart';
 import '../data/sample_data.dart';
 import '../domain/export.dart' as exporter;
 import '../domain/insights.dart';
+import '../domain/metrics.dart';
 import '../models/day_record.dart';
 import '../utils/format.dart';
 
@@ -20,8 +21,16 @@ enum DataMode { none, healthConnect, sample }
 
 enum ConnectOutcome { connected, needsInstall, unsupported, denied, error }
 
-/// Single source of truth for the app. Everything persists locally; the Gemini key lives in
-/// secure storage only.
+const _dayMetrics = {'steps', 'kcal', 'protein', 'lastMealMin'};
+
+/// Single source of truth. Everything persists locally; the Gemini key lives in secure storage.
+///
+/// Sync: incremental (last 3 days) every 3 minutes while the app is open, on open/resume and on
+/// pull-to-refresh; a 7-day repair sync once a day catches data your tracker uploads late; the full
+/// 60-day backfill runs on first connect or on demand.
+/// AI: a daily brief (forecast, tip, discoveries, one-liner per metric), a "right now" nudge that
+/// follows the day, auto-explained metrics, an experiment coach, on-demand discoveries and a
+/// streaming chat. All refresh themselves when the data they depend on changes.
 class AppController extends ChangeNotifier {
   AppController({LocalStore? store, KeyVault? vault, HealthSource? health, GeminiClient? gemini})
       : store = store ?? LocalStore(),
@@ -37,21 +46,33 @@ class AppController extends ChangeNotifier {
   final GeminiClient gemini;
   late final AiService ai;
 
+  // ------------------------------------------------------------------ data state
+
   bool loaded = false;
   bool onboarded = false;
   DataMode mode = DataMode.none;
   List<DayRecord> _records = [];
   double? weightKg;
   Map<String, List<String>> sources = {};
+  Map<String, DateTime> latestByCategory = {};
+  List<String> missingPerms = [];
+  List<String> failedReads = [];
   DateTime? lastSync;
+  DateTime? lastFullSync;
+  DateTime? lastDeepSync;
+  Duration? lastSyncTook;
+  int lastSyncDays = 0;
   bool syncing = false;
+  int syncDays = 0;
+  Set<String> syncDone = {};
   String? syncError;
   HealthAvailability? hcAvailability;
+
+  // ------------------------------------------------------------------ settings
 
   String depth = 'simple';
   bool reduceMotion = false;
   int tab = 0;
-
   SharingPrefs sharing = SharingPrefs();
   bool aiEnabled = true;
   String model = GeminiClient.defaultModel;
@@ -60,15 +81,37 @@ class AppController extends ChangeNotifier {
   bool keyVerified = false;
   DateTime? keyVerifiedAt;
 
+  // ------------------------------------------------------------------ AI state
+
   DailyBrief? brief;
   bool briefLoading = false;
   String? briefError;
+  DateTime? _briefErrorAt;
+  Duration _briefRetry = const Duration(minutes: 2);
+
+  LiveNudge? live;
+  bool liveLoading = false;
+  String? liveError;
+  DateTime? _liveErrorAt;
+
   final Map<String, String> explanations = {};
   final Set<String> explaining = {};
   final Map<String, String> explainErrors = {};
 
+  final Map<String, String> coach = {};
+  final Set<String> coaching = {};
+  final Map<String, String> coachErrors = {};
+
+  List<AiDiscovery> extraDiscoveries = [];
+  String extraDate = '';
+  bool moreLoading = false;
+  String? moreError;
+
   List<ChatMessage> chat = [];
   bool chatBusy = false;
+
+  /// The answer being streamed right now (null when nothing is streaming).
+  String? streaming;
   List<AiLogEntry> aiLog = [];
 
   Map<String, ExperimentRun> runs = {};
@@ -76,6 +119,8 @@ class AppController extends ChangeNotifier {
 
   Insights? _ins;
   Timer? _saveTimer;
+  Timer? _ticker;
+  Timer? _aiDebounce;
 
   // ------------------------------------------------------------------ derived
 
@@ -93,6 +138,7 @@ class AppController extends ChangeNotifier {
   bool get hasKey => (_apiKey ?? '').isNotEmpty;
   bool get aiReady => hasKey && aiEnabled && sharing.anything;
   bool get isSample => mode == DataMode.sample;
+  bool get aiBusy => briefLoading || liveLoading || chatBusy || moreLoading || explaining.isNotEmpty || coaching.isNotEmpty;
 
   String get maskedKey {
     final k = _apiKey ?? '';
@@ -100,13 +146,82 @@ class AppController extends ChangeNotifier {
     return '${k.substring(0, 4)}••••••••${k.substring(k.length - 4)}';
   }
 
-  String get dataKey {
-    final last = _records.length > 2 ? _records.sublist(_records.length - 2) : _records;
-    final sig = jsonEncode(last.map((r) => r.toJson()).toList()).hashCode;
-    return '${isoDate(DateTime.now())}|$sig|${jsonEncode(sharing.toJson()).hashCode}|$model';
+  String _sig(Object? o) => jsonEncode(o).hashCode.toRadixString(36);
+
+  String get daypart => HealthContext.daypart(DateTime.now());
+
+  /// Changes when last night's data or yesterday's food/steps change: the brief is about those.
+  String get briefKey {
+    final ins = insights;
+    final t = ins.today;
+    final y = t == null ? null : ins.prevOf(t);
+    final ys = y?.steps;
+    final night = t == null ? null : [t.sleepMin, t.deep, t.rem, t.awake, t.hrv, t.rhr, t.spo2, t.breathing];
+    final yday = y == null ? null : [y.meals.length, y.lastMealMin, y.kcal?.round(), ys == null ? null : (ys / 500).round()];
+    return [isoDate(DateTime.now()), _sig([night, yday, ins.nightsWithSleep]), _sig(sharing.toJson()), model].join('|');
   }
 
+  /// Changes as the day moves: part of day, meals logged, steps walked.
+  String get liveKey {
+    final t = insights.today;
+    final steps = t?.steps ?? 0;
+    return [isoDate(DateTime.now()), daypart, t?.meals.length ?? 0, (steps / 1500).floor(), _sig(sharing.toJson()), model].join('|');
+  }
+
+  /// Kept for older call sites.
+  String get dataKey => briefKey;
+
+  DailyBrief? get todaysBrief {
+    final b = brief;
+    return b != null && b.isToday ? b : null;
+  }
+
+  LiveNudge? get todaysLive {
+    final l = live;
+    return l != null && l.isToday ? l : null;
+  }
+
+  bool get briefStale {
+    final b = todaysBrief;
+    return b != null && b.dataKey != briefKey;
+  }
+
+  String? metricLine(String key) {
+    final b = todaysBrief;
+    if (b == null) return null;
+    final l = b.metricLines[key];
+    return (l == null || l.trim().isEmpty) ? null : l;
+  }
+
+  List<AiDiscovery> get todaysExtra => extraDate == isoDate(DateTime.now()) ? extraDiscoveries : const [];
+
   Map<String, dynamic> get contextPreview => HealthContext.build(insights, sharing);
+
+  List<String> get _fallbacks {
+    final out = <String>[];
+    for (final m in [...models, ...GeminiClient.preferredModels]) {
+      if (m == model || out.contains(m) || !m.contains('flash')) continue;
+      if (models.isNotEmpty && !models.contains(m)) continue;
+      out.add(m);
+      if (out.length >= 2) break;
+    }
+    return out;
+  }
+
+  String get aiStatusLine {
+    if (!hasKey) return 'AI off · add your Gemini key';
+    if (!aiEnabled) return 'AI paused';
+    if (!sharing.anything) return 'AI off · nothing shared';
+    if (!keyVerified) return 'Key needs attention';
+    if (aiBusy) return 'Gemini is thinking…';
+    if (briefError != null) return 'Gemini hit a snag · retrying soon';
+    final times = <DateTime>[
+      if (todaysBrief != null) todaysBrief!.createdAt,
+      if (todaysLive != null) todaysLive!.createdAt,
+    ]..sort();
+    if (times.isNotEmpty) return 'Gemini live · updated ${fmtTime(times.last)} · $model';
+    return 'Gemini ready · $model';
+  }
 
   // ------------------------------------------------------------------ lifecycle
 
@@ -123,16 +238,58 @@ class AppController extends ChangeNotifier {
     } catch (e) {
       debugPrint('Almanac: init failed ($e)');
     }
+    if (mode == DataMode.healthConnect) _merge(const <DayRecord>[], DateTime.now());
     _ins = null;
     loaded = true;
     notifyListeners();
+    _startTicker();
     if (mode == DataMode.healthConnect) unawaited(sync());
+    _scheduleAi();
   }
 
   void onResume() {
     _ins = null;
+    _startTicker();
+    if (mode == DataMode.healthConnect) {
+      _rollWindow();
+      unawaited(sync());
+    }
+    _scheduleAi();
     notifyListeners();
-    if (mode == DataMode.healthConnect) unawaited(sync());
+  }
+
+  void onPause() {
+    _ticker?.cancel();
+    _ticker = null;
+  }
+
+  void _startTicker() {
+    _ticker?.cancel();
+    _ticker = Timer.periodic(const Duration(minutes: 3), (_) => _tick());
+  }
+
+  void _tick() {
+    _ins = null; // re-evaluate "now", the energy curve and the day boundary
+    if (mode == DataMode.healthConnect) {
+      _rollWindow();
+      unawaited(sync());
+    }
+    _scheduleAi();
+    notifyListeners();
+  }
+
+  void _rollWindow() {
+    if (_records.isEmpty || _records.last.date != isoDate(DateTime.now())) _merge(const <DayRecord>[], DateTime.now());
+  }
+
+  /// Debounced so a burst of changes (sync + settings) costs one round of AI calls.
+  void _scheduleAi({Duration delay = const Duration(milliseconds: 700)}) {
+    _aiDebounce?.cancel();
+    _aiDebounce = Timer(delay, () {
+      if (!aiReady) return;
+      unawaited(refreshBrief());
+      unawaited(refreshLive());
+    });
   }
 
   void finishOnboarding() {
@@ -140,6 +297,7 @@ class AppController extends ChangeNotifier {
     tab = 0;
     _persist();
     notifyListeners();
+    _scheduleAi();
   }
 
   void setTab(int i) {
@@ -175,26 +333,69 @@ class AppController extends ChangeNotifier {
     _clearAiCache();
     _records = [];
     sources = {};
+    latestByCategory = {};
+    lastFullSync = null;
+    lastDeepSync = null;
     _ins = null;
     _persist();
-    await sync(force: true);
+    await sync(full: true);
     return syncError == null ? ConnectOutcome.connected : ConnectOutcome.error;
   }
 
-  Future<void> sync({bool force = false}) async {
+  /// Re-opens the Health Connect permission sheet, then backfills everything.
+  Future<void> fixPermissions() async {
+    try {
+      await health.requestAccess();
+    } on HealthException catch (e) {
+      syncError = e.message;
+      notifyListeners();
+    }
+    await sync(full: true);
+  }
+
+  /// [deep] = last 7 days, [full] = all 60 days. Plain calls sync the last 3 days and are
+  /// throttled to once every 90 seconds unless [force] is set.
+  Future<void> sync({bool force = false, bool deep = false, bool full = false}) async {
     if (mode != DataMode.healthConnect || syncing) return;
+    final now = DateTime.now();
     final ls = lastSync;
-    if (!force && ls != null && DateTime.now().difference(ls) < const Duration(minutes: 10)) return;
+    if (!force && !deep && !full && ls != null && now.difference(ls) < const Duration(seconds: 90)) return;
+    final lf = lastFullSync, ld = lastDeepSync;
+    final int days = (full || lf == null) ? 60 : ((deep || ld == null || isoDate(ld) != isoDate(now)) ? 7 : 3);
     syncing = true;
+    syncDays = days;
+    syncDone = {};
     syncError = null;
     notifyListeners();
     try {
-      final res = await health.fetch(days: 60);
-      _records = res.records;
-      weightKg = res.weightKg ?? weightKg;
-      sources = res.sources.map((k, v) => MapEntry(k, v.toList()..sort()));
-      lastSync = DateTime.now();
-      _ins = null;
+      final res = await health.fetch(
+        days: days,
+        now: now,
+        onProgress: (c) {
+          syncDone = {...syncDone, c};
+          notifyListeners();
+        },
+      );
+      _merge(res.records, now);
+      if (res.weightKg != null) weightKg = res.weightKg;
+      final merged = <String, Set<String>>{};
+      sources.forEach((k, v) => merged.putIfAbsent(k, () => <String>{}).addAll(v));
+      res.sources.forEach((k, v) => merged.putIfAbsent(k, () => <String>{}).addAll(v));
+      merged.forEach((k, v) => v.remove('Sample data'));
+      sources = merged.map((k, v) => MapEntry(k, v.toList()..sort()));
+      res.latest.forEach((k, v) {
+        final cur = latestByCategory[k];
+        if (cur == null || v.isAfter(cur)) latestByCategory[k] = v;
+      });
+      failedReads = res.failedTypes.toList()..sort();
+      lastSync = now;
+      lastSyncTook = res.elapsed;
+      lastSyncDays = days;
+      if (days == 60) lastFullSync = now;
+      if (days >= 7) {
+        lastDeepSync = now;
+        missingPerms = await health.missingPermissions();
+      }
       await store.writeRecords(_records);
       if (insights.isEmpty) {
         syncError = 'Connected, but Health Connect has no sleep, heart, step or meal data for the last 60 days. Make sure your tracker and meal app are set to sync with Health Connect.';
@@ -205,9 +406,29 @@ class AppController extends ChangeNotifier {
       syncError = 'Sync failed: $e';
     } finally {
       syncing = false;
+      syncDone = {};
       _persist();
       notifyListeners();
+      _scheduleAi();
     }
+  }
+
+  /// Replaces the synced days and keeps exactly 60 days ending today.
+  void _merge(List<DayRecord> fresh, DateTime now) {
+    final byDate = {for (final r in _records) r.date: r};
+    for (final r in fresh) {
+      byDate[r.date] = r;
+    }
+    final today = dayOnly(now);
+    final out = <DayRecord>[];
+    for (var i = 59; i >= 0; i--) {
+      final key = isoDate(addDays(today, -i));
+      final r = byDate[key] ?? DayRecord(date: key);
+      r.partial = i == 0;
+      out.add(r);
+    }
+    _records = out;
+    _ins = null;
   }
 
   void useSampleData() {
@@ -219,11 +440,14 @@ class AppController extends ChangeNotifier {
       'activity': ['Sample data'],
       'food': ['Sample data'],
     };
+    latestByCategory = {};
+    missingPerms = [];
     syncError = null;
     _clearAiCache();
     _ins = null;
     _persist();
     notifyListeners();
+    _scheduleAi();
   }
 
   // ------------------------------------------------------------------ settings
@@ -245,12 +469,14 @@ class AppController extends ChangeNotifier {
     _clearAiCache();
     _persist();
     notifyListeners();
+    _scheduleAi(delay: const Duration(seconds: 2));
   }
 
   void setAiEnabled(bool v) {
     aiEnabled = v;
     _persist();
     notifyListeners();
+    _scheduleAi();
   }
 
   // ------------------------------------------------------------------ BYOK
@@ -273,6 +499,7 @@ class AppController extends ChangeNotifier {
       _clearAiCache();
       _persist();
       notifyListeners();
+      _scheduleAi(delay: const Duration(milliseconds: 200));
       return null;
     } on GeminiException catch (e) {
       return e.message;
@@ -291,8 +518,10 @@ class AppController extends ChangeNotifier {
       keyVerified = true;
       keyVerifiedAt = DateTime.now();
       briefError = null;
+      liveError = null;
       _persist();
       notifyListeners();
+      _scheduleAi();
       return null;
     } on GeminiException catch (e) {
       if (e.keyProblem) keyVerified = false;
@@ -317,13 +546,20 @@ class AppController extends ChangeNotifier {
     _clearAiCache();
     _persist();
     notifyListeners();
+    _scheduleAi();
   }
 
   void _clearAiCache() {
     brief = null;
     briefError = null;
+    live = null;
+    liveError = null;
     explanations.clear();
     explainErrors.clear();
+    coach.clear();
+    coachErrors.clear();
+    extraDiscoveries = [];
+    moreError = null;
   }
 
   void _log(String purpose, Map<String, dynamic> ctx, bool ok) {
@@ -338,31 +574,39 @@ class AppController extends ChangeNotifier {
         categories: sharing.labels,
       ),
     );
-    if (aiLog.length > 50) aiLog = aiLog.sublist(0, 50);
+    if (aiLog.length > 60) aiLog = aiLog.sublist(0, 60);
   }
 
-  // ------------------------------------------------------------------ AI features
+  void _keyFailed(GeminiException e) {
+    if (e.keyProblem) keyVerified = false;
+  }
+
+  // ------------------------------------------------------------------ AI: brief & live
 
   Future<void> refreshBrief({bool force = false}) async {
     final key = _apiKey;
-    if (!aiReady || key == null || briefLoading || insights.today == null) return;
-    final dk = dataKey;
+    if (!aiReady || key == null || briefLoading || insights.isEmpty) return;
+    final bk = briefKey;
     final cur = brief;
-    if (!force && cur != null && cur.dataKey == dk) return;
-    if (!force && briefError != null) return; // don't hammer a failing key; the user retries
+    if (!force && cur != null && cur.dataKey == bk) return;
+    final errAt = _briefErrorAt;
+    if (!force && briefError != null && errAt != null && DateTime.now().difference(errAt) < _briefRetry) return;
     briefLoading = true;
     briefError = null;
     notifyListeners();
     final ctx = contextPreview;
     try {
-      brief = await ai.dailyBrief(key: key, model: model, context: ctx, dataKey: dk);
+      brief = await ai.dailyBrief(key: key, model: model, fallbacks: _fallbacks, context: ctx, dataKey: bk);
       _log('Daily forecast', ctx, true);
     } on GeminiException catch (e) {
       briefError = e.message;
-      if (e.keyProblem) keyVerified = false;
+      _briefErrorAt = DateTime.now();
+      _briefRetry = e.keyProblem ? const Duration(hours: 6) : const Duration(minutes: 2);
+      _keyFailed(e);
       _log('Daily forecast', ctx, false);
     } catch (e) {
       briefError = 'Something went wrong: $e';
+      _briefErrorAt = DateTime.now();
     } finally {
       briefLoading = false;
       _persist();
@@ -370,32 +614,183 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  String? explanationFor(String metric) => explanations['$metric|$depth|$dataKey'];
-  bool isExplaining(String metric) => explaining.contains(metric);
-
-  Future<void> explainMetric(String metric) async {
+  Future<void> refreshLive({bool force = false}) async {
     final key = _apiKey;
-    if (!aiReady || key == null || explaining.contains(metric)) return;
-    explaining.add(metric);
-    explainErrors.remove(metric);
+    if (!aiReady || key == null || liveLoading || insights.isEmpty) return;
+    final lk = liveKey;
+    final cur = live;
+    if (!force && cur != null && cur.isToday) {
+      if (cur.key == lk) return;
+      final samePart = cur.key.split('|').take(2).join('|') == lk.split('|').take(2).join('|');
+      if (samePart && DateTime.now().difference(cur.createdAt) < const Duration(minutes: 15)) return;
+    }
+    final errAt = _liveErrorAt;
+    if (!force && liveError != null && errAt != null && DateTime.now().difference(errAt) < const Duration(minutes: 3)) return;
+    liveLoading = true;
+    liveError = null;
     notifyListeners();
     final ctx = contextPreview;
-    final cacheKey = '$metric|$depth|$dataKey';
     try {
-      final text = await ai.explainMetric(key: key, model: model, context: ctx, metric: metric, depth: depth);
-      explanations[cacheKey] = text;
-      _log('Explain a metric', ctx, true);
+      live = await ai.liveNudge(key: key, model: model, fallbacks: _fallbacks, context: ctx, liveKey: lk, daypart: daypart);
+      _log('Right now', ctx, true);
     } on GeminiException catch (e) {
-      explainErrors[metric] = e.message;
-      _log('Explain a metric', ctx, false);
+      liveError = e.message;
+      _liveErrorAt = DateTime.now();
+      _keyFailed(e);
+      _log('Right now', ctx, false);
     } catch (e) {
-      explainErrors[metric] = 'Something went wrong: $e';
+      liveError = 'Something went wrong: $e';
+      _liveErrorAt = DateTime.now();
+    } finally {
+      liveLoading = false;
+      _persist();
+      notifyListeners();
+    }
+  }
+
+  void retryAi() {
+    briefError = null;
+    liveError = null;
+    unawaited(refreshBrief(force: true));
+    unawaited(refreshLive(force: true));
+  }
+
+  // ------------------------------------------------------------------ AI: metrics
+
+  String _explainKey(String metric) => '$metric|$depth|${_dayMetrics.contains(metric) ? liveKey : briefKey}';
+  String? explanationFor(String metric) => explanations[_explainKey(metric)];
+  String? explainErrorFor(String metric) => explainErrors[_explainKey(metric)];
+  bool isExplaining(String metric) => explaining.contains(metric);
+
+  Future<void> explainMetric(String metric, {bool force = false}) async {
+    final key = _apiKey;
+    if (!aiReady || key == null || explaining.contains(metric)) return;
+    final ck = _explainKey(metric);
+    if (!force && (explanations.containsKey(ck) || explainErrors.containsKey(ck))) return;
+    explaining.add(metric);
+    explainErrors.remove(ck);
+    notifyListeners();
+    final ctx = contextPreview;
+    try {
+      final text = await ai.explainMetric(key: key, model: model, fallbacks: _fallbacks, context: ctx, metric: metric, depth: depth);
+      explanations[ck] = text;
+      while (explanations.length > 60) {
+        explanations.remove(explanations.keys.first);
+      }
+      _log('Explain ${metrics[metric]?.name ?? metric}', ctx, true);
+    } on GeminiException catch (e) {
+      explainErrors[ck] = e.message;
+      _keyFailed(e);
+      _log('Explain ${metrics[metric]?.name ?? metric}', ctx, false);
+    } catch (e) {
+      explainErrors[ck] = 'Something went wrong: $e';
     } finally {
       explaining.remove(metric);
       _persist();
       notifyListeners();
     }
   }
+
+  // ------------------------------------------------------------------ AI: experiment coach
+
+  String coachKey(String id) {
+    final run = runs[id];
+    String state;
+    if (run == null) {
+      state = 'idle';
+    } else {
+      final p = insights.progress(run);
+      state = p.done ? 'done${p.kept}' : 'd${p.todayIndex}c${run.checkins.length}k${p.kept}';
+    }
+    return '$id|$state|${isoDate(DateTime.now())}|$model|$depth';
+  }
+
+  String? coachFor(String id) => coach[coachKey(id)];
+  String? coachErrorFor(String id) => coachErrors[coachKey(id)];
+  bool isCoaching(String id) => coaching.contains(id);
+
+  Future<void> loadCoach(String id, {bool force = false}) async {
+    final key = _apiKey;
+    final info = experiments[id];
+    if (!aiReady || key == null || info == null || coaching.contains(id)) return;
+    final ck = coachKey(id);
+    if (!force && (coach.containsKey(ck) || coachErrors.containsKey(ck))) return;
+    coaching.add(id);
+    coachErrors.remove(ck);
+    notifyListeners();
+    final run = runs[id];
+    final p = run == null ? null : insights.progress(run);
+    final imp = insights.experimentImpact(id);
+    final exp = <String, dynamic>{
+      'id': id,
+      'title': info.title,
+      'daily_question': info.question,
+      'tracked_metric': info.metric,
+      'state': p == null ? 'not_started' : (p.done ? 'finished' : 'running'),
+      if (imp != null) 'predicted_from_history': '+${imp.delta} ${imp.unit}',
+      if (p != null) 'day': p.todayIndex + 1,
+      if (p != null) 'days_kept': p.kept,
+      if (p != null) 'days_answered': p.answered,
+      if (p != null && p.measured != null) 'measured_after_kept_days': (p.measured! * 10).round() / 10,
+      if (p != null && p.baseline != null) 'baseline_30_days_before': (p.baseline! * 10).round() / 10,
+      if (p != null) 'nights_measured': p.nights,
+    };
+    final ctx = contextPreview;
+    try {
+      final text = await ai.experimentCoach(key: key, model: model, fallbacks: _fallbacks, context: ctx, experiment: exp, depth: depth);
+      coach[ck] = text;
+      while (coach.length > 30) {
+        coach.remove(coach.keys.first);
+      }
+      _log('Experiment coach', ctx, true);
+    } on GeminiException catch (e) {
+      coachErrors[ck] = e.message;
+      _keyFailed(e);
+      _log('Experiment coach', ctx, false);
+    } catch (e) {
+      coachErrors[ck] = 'Something went wrong: $e';
+    } finally {
+      coaching.remove(id);
+      _persist();
+      notifyListeners();
+    }
+  }
+
+  // ------------------------------------------------------------------ AI: discover more
+
+  Future<void> discoverMore() async {
+    final key = _apiKey;
+    if (!aiReady || key == null || moreLoading) return;
+    moreLoading = true;
+    moreError = null;
+    notifyListeners();
+    final ctx = contextPreview;
+    final exclude = <String>[
+      ...?todaysBrief?.discoveries.map((d) => d.head),
+      ...todaysExtra.map((d) => d.head),
+      ...insights.discoveries().map((d) => d.head),
+    ];
+    try {
+      final list = await ai.moreDiscoveries(key: key, model: model, fallbacks: _fallbacks, context: ctx, exclude: exclude);
+      final today = isoDate(DateTime.now());
+      final keep = extraDate == today ? extraDiscoveries : <AiDiscovery>[];
+      extraDate = today;
+      extraDiscoveries = [...list, ...keep].take(12).toList();
+      _log('Find new patterns', ctx, true);
+    } on GeminiException catch (e) {
+      moreError = e.message;
+      _keyFailed(e);
+      _log('Find new patterns', ctx, false);
+    } catch (e) {
+      moreError = 'Something went wrong: $e';
+    } finally {
+      moreLoading = false;
+      _persist();
+      notifyListeners();
+    }
+  }
+
+  // ------------------------------------------------------------------ AI: chat
 
   Future<void> sendChat(String raw) async {
     final q = raw.trim();
@@ -413,16 +808,47 @@ class AppController extends ChangeNotifier {
       reply = LocalBrain.respond(q, insights, depth);
     } else {
       final ctx = contextPreview;
+      final buf = StringBuffer();
+      streaming = '';
+      notifyListeners();
       try {
-        reply = await ai.chat(key: key, model: model, context: ctx, history: history, question: q, depth: depth);
+        await for (final piece in ai.chatStream(
+          key: key,
+          model: model,
+          fallbacks: _fallbacks,
+          context: ctx,
+          history: history,
+          question: q,
+          depth: depth,
+        )) {
+          buf.write(piece);
+          final v = AiService.visible(buf.toString());
+          if (v != streaming) {
+            streaming = v;
+            notifyListeners();
+          }
+        }
+        reply = AiService.finishChat(buf.toString());
         _log('Ask', ctx, true);
       } on GeminiException catch (e) {
-        reply = LocalBrain.respond(q, insights, depth).withError(e.message);
-        if (e.keyProblem) keyVerified = false;
+        final partial = AiService.visible(buf.toString());
+        if (partial.length > 40) {
+          reply = ChatMessage(
+            id: ChatMessage.newId(),
+            role: 'ai',
+            text: partial,
+            source: 'gemini',
+            error: 'the connection dropped, so this answer may be cut short',
+          );
+        } else {
+          reply = LocalBrain.respond(q, insights, depth).withError(e.message);
+        }
+        _keyFailed(e);
         _log('Ask', ctx, false);
       } catch (e) {
         reply = LocalBrain.respond(q, insights, depth).withError('$e');
       }
+      streaming = null;
     }
     chat.add(reply);
     if (chat.length > 120) chat = chat.sublist(chat.length - 120);
@@ -482,7 +908,7 @@ class AppController extends ChangeNotifier {
   // ------------------------------------------------------------------ export & wipe
 
   String exportCsv() => exporter.recordsCsv(_records);
-  String exportWeekly() => exporter.weeklyEdition(insights, brief: brief);
+  String exportWeekly() => exporter.weeklyEdition(insights, brief: todaysBrief);
 
   Future<void> wipeEverything() async {
     _saveTimer?.cancel();
@@ -494,7 +920,13 @@ class AppController extends ChangeNotifier {
     _records = [];
     weightKg = null;
     sources = {};
+    latestByCategory = {};
+    missingPerms = [];
+    failedReads = [];
     lastSync = null;
+    lastFullSync = null;
+    lastDeepSync = null;
+    lastSyncTook = null;
     syncError = null;
     depth = 'simple';
     reduceMotion = false;
@@ -525,19 +957,27 @@ class AppController extends ChangeNotifier {
     });
   }
 
+  static String? _iso(DateTime? t) => t?.toIso8601String();
+  static DateTime? _date(dynamic v) => v == null ? null : DateTime.tryParse(v.toString());
+
   Map<String, dynamic> _toJson() {
-    final ex = explanations.entries.toList();
-    final keep = ex.length > 40 ? ex.sublist(ex.length - 40) : ex;
     final b = brief;
-    final ls = lastSync;
-    final kv = keyVerifiedAt;
+    final l = live;
+    final took = lastSyncTook;
     return {
-      'v': 1,
+      'v': 2,
       'onboarded': onboarded,
       'mode': mode.name,
       if (weightKg != null) 'weightKg': weightKg,
       'sources': sources,
-      if (ls != null) 'lastSync': ls.toIso8601String(),
+      'latest': latestByCategory.map((k, v) => MapEntry(k, v.toIso8601String())),
+      'missingPerms': missingPerms,
+      'failedReads': failedReads,
+      'lastSync': _iso(lastSync),
+      'lastFullSync': _iso(lastFullSync),
+      'lastDeepSync': _iso(lastDeepSync),
+      if (took != null) 'lastSyncTookMs': took.inMilliseconds,
+      'lastSyncDays': lastSyncDays,
       'depth': depth,
       'reduceMotion': reduceMotion,
       'sharing': sharing.toJson(),
@@ -545,9 +985,13 @@ class AppController extends ChangeNotifier {
       'model': model,
       'models': models,
       'keyVerified': keyVerified,
-      if (kv != null) 'keyVerifiedAt': kv.toIso8601String(),
+      'keyVerifiedAt': _iso(keyVerifiedAt),
       if (b != null) 'brief': b.toJson(),
-      'explanations': {for (final e in keep) e.key: e.value},
+      if (l != null) 'live': l.toJson(),
+      'explanations': explanations,
+      'coach': coach,
+      'extraDate': extraDate,
+      'extraDiscoveries': extraDiscoveries.map((d) => d.toJson()).toList(),
       'chat': chat.map((m) => m.toJson()).toList(),
       'aiLog': aiLog.map((e) => e.toJson()).toList(),
       'runs': runs.map((k, v) => MapEntry(k, v.toJson())),
@@ -556,36 +1000,68 @@ class AppController extends ChangeNotifier {
   }
 
   void _fromJson(Map<String, dynamic> j) {
+    List<String> strings(dynamic v) => ((v as List?) ?? const []).map((e) => e.toString()).toList();
+    Map<String, String> stringMap(dynamic v) => ((v as Map?) ?? const {}).map((k, val) => MapEntry(k.toString(), val.toString()));
+
     onboarded = j['onboarded'] == true;
     mode = DataMode.values.firstWhere((m) => m.name == j['mode'], orElse: () => DataMode.none);
     weightKg = (j['weightKg'] as num?)?.toDouble();
-    sources = ((j['sources'] as Map?) ?? const {}).map(
-      (k, v) => MapEntry(k.toString(), ((v as List?) ?? const []).map((e) => e.toString()).toList()),
-    );
-    lastSync = DateTime.tryParse((j['lastSync'] ?? '').toString());
+    sources = ((j['sources'] as Map?) ?? const {}).map((k, v) => MapEntry(k.toString(), strings(v)));
+    latestByCategory = {};
+    ((j['latest'] as Map?) ?? const {}).forEach((k, v) {
+      final t = _date(v);
+      if (t != null) latestByCategory[k.toString()] = t;
+    });
+    missingPerms = strings(j['missingPerms']);
+    failedReads = strings(j['failedReads']);
+    lastSync = _date(j['lastSync']);
+    lastFullSync = _date(j['lastFullSync']);
+    lastDeepSync = _date(j['lastDeepSync']);
+    final tookMs = (j['lastSyncTookMs'] as num?)?.toInt();
+    lastSyncTook = tookMs == null ? null : Duration(milliseconds: tookMs);
+    lastSyncDays = (j['lastSyncDays'] as num?)?.toInt() ?? 0;
     depth = j['depth'] == 'nerdy' ? 'nerdy' : 'simple';
     reduceMotion = j['reduceMotion'] == true;
     if (j['sharing'] is Map) sharing = SharingPrefs.fromJson(Map<String, dynamic>.from(j['sharing'] as Map));
     aiEnabled = j['aiEnabled'] != false;
     model = (j['model'] ?? GeminiClient.defaultModel).toString();
-    models = ((j['models'] as List?) ?? const []).map((e) => e.toString()).toList();
+    models = strings(j['models']);
     keyVerified = j['keyVerified'] == true;
-    keyVerifiedAt = DateTime.tryParse((j['keyVerifiedAt'] ?? '').toString());
-    if (j['brief'] is Map) brief = DailyBrief.fromJson(Map<String, dynamic>.from(j['brief'] as Map));
+    keyVerifiedAt = _date(j['keyVerifiedAt']);
+    if (j['brief'] is Map) {
+      try {
+        brief = DailyBrief.fromJson(Map<String, dynamic>.from(j['brief'] as Map));
+      } catch (_) {}
+    }
+    if (j['live'] is Map) {
+      try {
+        live = LiveNudge.fromJson(Map<String, dynamic>.from(j['live'] as Map));
+      } catch (_) {}
+    }
     explanations
       ..clear()
-      ..addAll(((j['explanations'] as Map?) ?? const {}).map((k, v) => MapEntry(k.toString(), v.toString())));
+      ..addAll(stringMap(j['explanations']));
+    coach
+      ..clear()
+      ..addAll(stringMap(j['coach']));
+    extraDate = (j['extraDate'] ?? '').toString();
+    extraDiscoveries = ((j['extraDiscoveries'] as List?) ?? const [])
+        .whereType<Map>()
+        .map((m) => AiDiscovery.fromJson(Map<String, dynamic>.from(m)))
+        .toList();
     chat = ((j['chat'] as List?) ?? const []).whereType<Map>().map((m) => ChatMessage.fromJson(Map<String, dynamic>.from(m))).toList();
     aiLog = ((j['aiLog'] as List?) ?? const []).whereType<Map>().map((m) => AiLogEntry.fromJson(Map<String, dynamic>.from(m))).toList();
     runs = ((j['runs'] as Map?) ?? const {}).map(
       (k, v) => MapEntry(k.toString(), ExperimentRun.fromJson(Map<String, dynamic>.from(v as Map))),
     );
-    saved = ((j['saved'] as List?) ?? const []).map((e) => e.toString()).toSet();
+    saved = strings(j['saved']).toSet();
   }
 
   @override
   void dispose() {
     _saveTimer?.cancel();
+    _ticker?.cancel();
+    _aiDebounce?.cancel();
     super.dispose();
   }
 }
