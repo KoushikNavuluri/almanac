@@ -57,6 +57,14 @@ class HealthContext {
   static double? _r1(double? v) => v == null ? null : (v * 10).round() / 10;
   static int? _r0(double? v) => v?.round();
 
+  static String daypart(DateTime t) {
+    final h = t.hour;
+    if (h < 12) return 'morning';
+    if (h < 17) return 'afternoon';
+    if (h < 21) return 'evening';
+    return 'night';
+  }
+
   static Map<String, dynamic> build(Insights ins, SharingPrefs p) {
     final recs = ins.records;
     final rows = recs.length > p.days ? recs.sublist(recs.length - p.days) : recs;
@@ -128,13 +136,22 @@ class HealthContext {
     if (jl != null) patterns['weekend_sleep_shift_min'] = jl.round();
 
     final score = (p.sleep || p.heart) ? ins.readiness() : null;
+    final curve = (p.sleep || p.heart) ? ins.energyCurve() : null;
+    final now = DateTime.now();
     return {
       'app': 'Almanac',
-      'today': isoDate(ins.now),
-      'local_time': fmtTime(ins.now),
-      'about_the_data': 'Daily aggregates from a consumer wearable and a meal-logging app via Health Connect. Estimates, not medical measurements.',
+      'today': isoDate(now),
+      'local_time': fmtTime(now),
+      'part_of_day': daypart(now),
+      'about_the_data': 'Daily aggregates from a consumer wearable and a meal-logging app via Health Connect. Estimates, not medical measurements. The last entry in days is today, still in progress.',
       if (score != null) 'readiness_score_0_to_100': score,
       if (score != null) 'readiness_label': ins.condition(score).label,
+      if (curve != null)
+        'energy_forecast_today': {
+          'morning_peak': fmtClock(curve.peak.h * 60),
+          'afternoon_dip': fmtClock(curve.dip.h * 60),
+          'second_wind': fmtClock(curve.second.h * 60),
+        },
       'shared_categories': p.labels,
       'days': daily,
       'personal_normal_30d': normal,

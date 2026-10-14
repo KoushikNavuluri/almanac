@@ -1,3 +1,5 @@
+import '../utils/format.dart';
+
 /// A message in the Ask conversation. Stored only on this phone.
 class ChatMessage {
   ChatMessage({
@@ -27,7 +29,7 @@ class ChatMessage {
   /// 'gemini' or 'local'.
   final String source;
 
-  /// Set when Gemini failed and the local brain answered instead.
+  /// Set when Gemini failed (or was cut off).
   final String? error;
 
   bool get isMe => role == 'me';
@@ -87,37 +89,45 @@ class AiDiscovery {
       );
 }
 
-/// Gemini's written forecast for one day of data.
+/// Gemini's written forecast for the day, plus a one-liner per metric.
 class DailyBrief {
   DailyBrief({
+    required this.headline,
     required this.noteSimple,
     required this.noteNerdy,
     required this.tipTitle,
     required this.tipBody,
     required this.discoveries,
     required this.funFact,
+    required this.metricLines,
     required this.model,
     required this.createdAt,
     required this.dataKey,
   });
 
-  final String noteSimple, noteNerdy, tipTitle, tipBody, funFact, model, dataKey;
+  final String headline, noteSimple, noteNerdy, tipTitle, tipBody, funFact, model, dataKey;
   final List<AiDiscovery> discoveries;
+  final Map<String, String> metricLines;
   final DateTime createdAt;
 
+  bool get isToday => isoDate(createdAt) == isoDate(DateTime.now());
+
   Map<String, dynamic> toJson() => {
+        'headline': headline,
         'noteSimple': noteSimple,
         'noteNerdy': noteNerdy,
         'tipTitle': tipTitle,
         'tipBody': tipBody,
         'discoveries': discoveries.map((d) => d.toJson()).toList(),
         'funFact': funFact,
+        'metricLines': metricLines,
         'model': model,
         'createdAt': createdAt.toIso8601String(),
         'dataKey': dataKey,
       };
 
   factory DailyBrief.fromJson(Map<String, dynamic> j) => DailyBrief(
+        headline: (j['headline'] ?? '').toString(),
         noteSimple: (j['noteSimple'] ?? '').toString(),
         noteNerdy: (j['noteNerdy'] ?? '').toString(),
         tipTitle: (j['tipTitle'] ?? '').toString(),
@@ -127,9 +137,49 @@ class DailyBrief {
             .map((m) => AiDiscovery.fromJson(Map<String, dynamic>.from(m)))
             .toList(),
         funFact: (j['funFact'] ?? '').toString(),
+        metricLines: ((j['metricLines'] as Map?) ?? const {}).map((k, v) => MapEntry(k.toString(), v.toString())),
         model: (j['model'] ?? '').toString(),
         createdAt: DateTime.tryParse((j['createdAt'] ?? '').toString()) ?? DateTime.now(),
         dataKey: (j['dataKey'] ?? '').toString(),
+      );
+}
+
+/// A short "right now" note that follows the day: refreshed as meals, steps and time move on.
+class LiveNudge {
+  LiveNudge({
+    required this.title,
+    required this.body,
+    this.metric,
+    this.experiment,
+    required this.key,
+    required this.model,
+    required this.createdAt,
+  });
+
+  final String title, body, key, model;
+  final String? metric, experiment;
+  final DateTime createdAt;
+
+  bool get isToday => isoDate(createdAt) == isoDate(DateTime.now());
+
+  Map<String, dynamic> toJson() => {
+        'title': title,
+        'body': body,
+        if (metric != null) 'metric': metric,
+        if (experiment != null) 'experiment': experiment,
+        'key': key,
+        'model': model,
+        'createdAt': createdAt.toIso8601String(),
+      };
+
+  factory LiveNudge.fromJson(Map<String, dynamic> j) => LiveNudge(
+        title: (j['title'] ?? '').toString(),
+        body: (j['body'] ?? '').toString(),
+        metric: j['metric'] as String?,
+        experiment: j['experiment'] as String?,
+        key: (j['key'] ?? '').toString(),
+        model: (j['model'] ?? '').toString(),
+        createdAt: DateTime.tryParse((j['createdAt'] ?? '').toString()) ?? DateTime.now(),
       );
 }
 
