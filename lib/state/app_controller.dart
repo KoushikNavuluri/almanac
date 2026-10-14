@@ -11,7 +11,7 @@ import '../ai/local_brain.dart';
 import '../data/health_source.dart';
 import '../data/local_store.dart';
 import '../data/sample_data.dart';
-import '../domain/export.dart' as export;
+import '../domain/export.dart' as exporter;
 import '../domain/insights.dart';
 import '../models/day_record.dart';
 import '../utils/format.dart';
@@ -85,7 +85,9 @@ class AppController extends ChangeNotifier {
     final cur = _ins;
     if (cur != null && isoDate(cur.now) == isoDate(DateTime.now())) return cur;
     if (mode == DataMode.sample && cur != null) _records = SampleData.generate(DateTime.now());
-    return _ins = Insights(_records, weightKg: weightKg);
+    final fresh = Insights(_records, weightKg: weightKg);
+    _ins = fresh;
+    return fresh;
   }
 
   bool get hasKey => (_apiKey ?? '').isNotEmpty;
@@ -149,9 +151,10 @@ class AppController extends ChangeNotifier {
   // ------------------------------------------------------------------ data sources
 
   Future<HealthAvailability> checkHealth() async {
-    hcAvailability = await health.availability();
+    final av = await health.availability();
+    hcAvailability = av;
     notifyListeners();
-    return hcAvailability!;
+    return av;
   }
 
   Future<void> installHealthConnect() => health.installHealthConnect();
@@ -171,6 +174,7 @@ class AppController extends ChangeNotifier {
     mode = DataMode.healthConnect;
     _clearAiCache();
     _records = [];
+    sources = {};
     _ins = null;
     _persist();
     await sync(force: true);
@@ -193,7 +197,7 @@ class AppController extends ChangeNotifier {
       _ins = null;
       await store.writeRecords(_records);
       if (insights.isEmpty) {
-        syncError = "Connected, but Health Connect has no sleep, heart, step or meal data for the last 60 days. Make sure your tracker and meal app are set to sync with Health Connect.";
+        syncError = 'Connected, but Health Connect has no sleep, heart, step or meal data for the last 60 days. Make sure your tracker and meal app are set to sync with Health Connect.';
       }
     } on HealthException catch (e) {
       syncError = e.message;
@@ -254,7 +258,9 @@ class AppController extends ChangeNotifier {
   /// Validates the key with Google, then stores it in secure storage. Returns an error or null.
   Future<String?> saveKey(String raw) async {
     final key = raw.trim().replaceAll(RegExp(r'\s'), '');
-    if (key.length < 20) return "That doesn't look like a Gemini API key. Keys from Google AI Studio are about 39 characters and usually start with \"AIza\".";
+    if (key.length < 20) {
+      return "That doesn't look like a Gemini API key. Keys from Google AI Studio are about 39 characters and usually start with AIza.";
+    }
     try {
       final list = await gemini.listModels(key);
       if (list.isEmpty) return 'That key works, but no Gemini text models are available to it.';
@@ -284,6 +290,7 @@ class AppController extends ChangeNotifier {
       if (list.isNotEmpty && !list.contains(model)) model = GeminiClient.pickDefault(list);
       keyVerified = true;
       keyVerifiedAt = DateTime.now();
+      briefError = null;
       _persist();
       notifyListeners();
       return null;
@@ -337,17 +344,18 @@ class AppController extends ChangeNotifier {
   // ------------------------------------------------------------------ AI features
 
   Future<void> refreshBrief({bool force = false}) async {
-    if (!aiReady || briefLoading || insights.today == null) return;
-    final key = dataKey;
+    final key = _apiKey;
+    if (!aiReady || key == null || briefLoading || insights.today == null) return;
+    final dk = dataKey;
     final cur = brief;
-    if (!force && cur != null && cur.dataKey == key) return;
-    if (!force && briefError != null) return; // don't hammer a failing key; user retries
+    if (!force && cur != null && cur.dataKey == dk) return;
+    if (!force && briefError != null) return; // don't hammer a failing key; the user retries
     briefLoading = true;
     briefError = null;
     notifyListeners();
     final ctx = contextPreview;
     try {
-      brief = await ai.dailyBrief(key: _apiKey!, model: model, context: ctx, dataKey: key);
+      brief = await ai.dailyBrief(key: key, model: model, context: ctx, dataKey: dk);
       _log('Daily forecast', ctx, true);
     } on GeminiException catch (e) {
       briefError = e.message;
@@ -366,18 +374,22 @@ class AppController extends ChangeNotifier {
   bool isExplaining(String metric) => explaining.contains(metric);
 
   Future<void> explainMetric(String metric) async {
-    if (!aiReady || explaining.contains(metric)) return;
+    final key = _apiKey;
+    if (!aiReady || key == null || explaining.contains(metric)) return;
     explaining.add(metric);
     explainErrors.remove(metric);
     notifyListeners();
     final ctx = contextPreview;
+    final cacheKey = '$metric|$depth|$dataKey';
     try {
-      final text = await ai.explainMetric(key: _apiKey!, model: model, context: ctx, metric: metric, depth: depth);
-      explanations['$metric|$depth|$dataKey'] = text;
+      final text = await ai.explainMetric(key: key, model: model, context: ctx, metric: metric, depth: depth);
+      explanations[cacheKey] = text;
       _log('Explain a metric', ctx, true);
     } on GeminiException catch (e) {
       explainErrors[metric] = e.message;
       _log('Explain a metric', ctx, false);
+    } catch (e) {
+      explainErrors[metric] = 'Something went wrong: $e';
     } finally {
       explaining.remove(metric);
       _persist();
@@ -394,19 +406,22 @@ class AppController extends ChangeNotifier {
     notifyListeners();
     ChatMessage reply;
     final safety = LocalBrain.safety(q);
+    final key = _apiKey;
     if (safety != null) {
       reply = safety;
-    } else if (!aiReady) {
+    } else if (!aiReady || key == null) {
       reply = LocalBrain.respond(q, insights, depth);
     } else {
       final ctx = contextPreview;
       try {
-        reply = await ai.chat(key: _apiKey!, model: model, context: ctx, history: history, question: q, depth: depth);
+        reply = await ai.chat(key: key, model: model, context: ctx, history: history, question: q, depth: depth);
         _log('Ask', ctx, true);
       } on GeminiException catch (e) {
         reply = LocalBrain.respond(q, insights, depth).withError(e.message);
         if (e.keyProblem) keyVerified = false;
         _log('Ask', ctx, false);
+      } catch (e) {
+        reply = LocalBrain.respond(q, insights, depth).withError('$e');
       }
     }
     chat.add(reply);
@@ -466,10 +481,11 @@ class AppController extends ChangeNotifier {
 
   // ------------------------------------------------------------------ export & wipe
 
-  String exportCsv() => export.recordsCsv(_records);
-  String exportWeekly() => export.weeklyEdition(insights, brief: brief);
+  String exportCsv() => exporter.recordsCsv(_records);
+  String exportWeekly() => exporter.weeklyEdition(insights, brief: brief);
 
   Future<void> wipeEverything() async {
+    _saveTimer?.cancel();
     await store.wipe();
     await vault.delete();
     _apiKey = null;
@@ -503,20 +519,25 @@ class AppController extends ChangeNotifier {
   void _persist() {
     _saveTimer?.cancel();
     _saveTimer = Timer(const Duration(milliseconds: 250), () {
-      unawaited(store.writeState(_toJson()).catchError((Object e) => debugPrint('Almanac: save failed ($e)')));
+      store.writeState(_toJson()).catchError((Object e) {
+        debugPrint('Almanac: save failed ($e)');
+      });
     });
   }
 
   Map<String, dynamic> _toJson() {
     final ex = explanations.entries.toList();
     final keep = ex.length > 40 ? ex.sublist(ex.length - 40) : ex;
+    final b = brief;
+    final ls = lastSync;
+    final kv = keyVerifiedAt;
     return {
       'v': 1,
       'onboarded': onboarded,
       'mode': mode.name,
       if (weightKg != null) 'weightKg': weightKg,
       'sources': sources,
-      if (lastSync != null) 'lastSync': lastSync!.toIso8601String(),
+      if (ls != null) 'lastSync': ls.toIso8601String(),
       'depth': depth,
       'reduceMotion': reduceMotion,
       'sharing': sharing.toJson(),
@@ -524,8 +545,8 @@ class AppController extends ChangeNotifier {
       'model': model,
       'models': models,
       'keyVerified': keyVerified,
-      if (keyVerifiedAt != null) 'keyVerifiedAt': keyVerifiedAt!.toIso8601String(),
-      if (brief != null) 'brief': brief!.toJson(),
+      if (kv != null) 'keyVerifiedAt': kv.toIso8601String(),
+      if (b != null) 'brief': b.toJson(),
       'explanations': {for (final e in keep) e.key: e.value},
       'chat': chat.map((m) => m.toJson()).toList(),
       'aiLog': aiLog.map((e) => e.toJson()).toList(),

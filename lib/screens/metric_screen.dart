@@ -10,6 +10,42 @@ import '../widgets/charts.dart';
 import '../widgets/common.dart';
 import 'ai_settings_screen.dart';
 
+String _special(Insights ins, String k) {
+  switch (k) {
+    case 'deep':
+      {
+        final s = ins.lateDinnerDeep;
+        return s.ok ? ' After late dinners it averages ${s.yes.round()} min. After earlier ones, ${s.no.round()}.' : '';
+      }
+    case 'hrv':
+      {
+        final s = ins.lateDinnerHrv;
+        return s.ok && s.diff < 0 ? ' Late dinners pull it down about ${(-s.diff).round()} ms the next night.' : '';
+      }
+    case 'rhr':
+      {
+        final s = ins.lateDinnerRhr;
+        return s.ok ? ' It runs ${s.diff.abs().toStringAsFixed(1)} bpm ${s.diff >= 0 ? 'higher' : 'lower'} after late dinners.' : '';
+      }
+    case 'sleepMin':
+      return ' Your longest run of 7h+ nights: ${ins.best7hStreak} in a row.';
+    case 'steps':
+      {
+        final s = ins.bigDaySleep;
+        return s.ok ? ' On 9k+ days you sleep ${s.diff.abs().round()} min ${s.diff >= 0 ? 'longer' : 'shorter'} that night.' : '';
+      }
+    case 'lastMealMin':
+      {
+        final late = ins.history.where((x) => x.lateDinner).length;
+        final known = ins.history.where((x) => x.lastMealMin != null).length;
+        return ' $late of your last $known logged dinners finished after 10 PM.';
+      }
+    case 'protein':
+      return ' Your target is about ${ins.proteinTarget.round()} g a day.';
+  }
+  return '';
+}
+
 String yoursSays(Insights ins, String k) {
   final info = metrics[k]!;
   final b = ins.baseline(k);
@@ -21,12 +57,12 @@ String yoursSays(Insights ins, String k) {
   double? avg(List<DayRecord> rows) {
     final v = rows.map((x) => x.value(k)).whereType<double>().toList();
     if (v.length < 4) return null;
-    return v.reduce((a, b) => a + b) / v.length;
+    return v.reduce((a, c) => a + c) / v.length;
   }
 
   final h = ins.history;
   final recent = avg(h.length >= 14 ? h.sublist(h.length - 14) : h);
-  final prior = avg(h.length >= 28 ? h.sublist(h.length - 28, h.length - 14) : const []);
+  final prior = h.length >= 28 ? avg(h.sublist(h.length - 28, h.length - 14)) : null;
   var trend = '';
   if (recent != null && prior != null) {
     final delta = recent - prior;
@@ -38,35 +74,13 @@ String yoursSays(Insights ins, String k) {
     }
   }
   final lo = fmtValue(k, b.mean - b.sd), hi = fmtValue(k, b.mean + b.sd);
-  var special = '';
-  switch (k) {
-    case 'deep':
-      final s = ins.lateDinnerDeep;
-      if (s.ok) special = ' After late dinners it averages ${s.yes.round()} min. After earlier ones, ${s.no.round()}.';
-    case 'hrv':
-      final s = ins.lateDinnerHrv;
-      if (s.ok && s.diff < 0) special = ' Late dinners pull it down about ${(-s.diff).round()} ms the next night.';
-    case 'rhr':
-      final s = ins.lateDinnerRhr;
-      if (s.ok) special = ' It runs ${s.diff.toStringAsFixed(1)} bpm ${s.diff >= 0 ? 'higher' : 'lower'} after late dinners.';
-    case 'sleepMin':
-      special = ' Your longest run of 7h+ nights: ${ins.best7hStreak} in a row.';
-    case 'steps':
-      final s = ins.bigDaySleep;
-      if (s.ok) special = ' On 9k+ days you sleep ${s.diff.round()} min ${s.diff >= 0 ? 'longer' : 'shorter'} that night.';
-    case 'lastMealMin':
-      final late = ins.history.where((x) => x.lateDinner).length;
-      final known = ins.history.where((x) => x.lastMealMin != null).length;
-      special = ' $late of your last $known logged dinners finished after 10 PM.';
-    case 'protein':
-      special = ' Your target is about ${ins.proteinTarget.round()} g a day.';
+  const dayMetrics = {'steps', 'kcal', 'protein', 'lastMealMin'};
+  var latest = '';
+  if (r != null) {
+    final partialToday = r.isToday && (ins.today?.partial ?? false) && dayMetrics.contains(k);
+    latest = partialToday ? ' Today so far: ${fmtValue(k, r.value)}$unit.' : ' Latest: ${fmtValue(k, r.value)}$unit, ${ins.status(k).word}.';
   }
-  final latest = r == null
-      ? ''
-      : r.isToday && (ins.today?.partial ?? false) && {'steps', 'kcal', 'protein', 'lastMealMin'}.contains(k)
-          ? ' Today so far: ${fmtValue(k, r.value)}$unit.'
-          : ' Latest: ${fmtValue(k, r.value)}$unit, ${ins.status(k).word}.';
-  return 'Your normal sits between $lo and $hi$unit.$latest$trend$special';
+  return 'Your normal sits between $lo and $hi$unit.$latest$trend${_special(ins, k)}';
 }
 
 class MetricScreen extends StatefulWidget {
@@ -109,6 +123,7 @@ class _MetricScreenState extends State<MetricScreen> {
     final rows = recs.length > _range ? recs.sublist(recs.length - _range) : recs;
     final explanation = app.explanationFor(k);
     final explainError = app.explainErrors[k];
+    final double scale = k == 'sleepMin' ? 1 / 60 : 1.0;
 
     return Scaffold(
       backgroundColor: C.paper,
@@ -214,17 +229,15 @@ class _MetricScreenState extends State<MetricScreen> {
                     axisFormat: (v) => _axis(k, v),
                     bandLow: b.ok ? b.mean - b.sd : null,
                     bandHigh: b.ok ? b.mean + b.sd : null,
-                    scale: k == 'sleepMin' ? 1 / 60 : 1,
+                    scale: scale,
                   ),
                 ),
                 const SizedBox(height: 8),
-                Row(children: [
+                Wrap(crossAxisAlignment: WrapCrossAlignment.center, spacing: 6, runSpacing: 4, children: [
                   Container(width: 20, height: 12, decoration: BoxDecoration(color: C.teal.withValues(alpha: 0.2), borderRadius: BorderRadius.circular(3))),
-                  const SizedBox(width: 6),
                   Text('Your normal range', style: T.ui(12, color: C.muted)),
-                  const SizedBox(width: 14),
+                  const SizedBox(width: 8),
                   Container(width: 10, height: 10, decoration: const BoxDecoration(color: C.crimson, shape: BoxShape.circle)),
-                  const SizedBox(width: 6),
                   Text('Latest · tap the chart to read a day', style: T.ui(12, color: C.muted)),
                 ]),
                 const SizedBox(height: 16),
@@ -259,6 +272,7 @@ class _InfoBox extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final f = foot;
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(16),
@@ -271,9 +285,9 @@ class _InfoBox extends StatelessWidget {
             Text(title, style: T.ui(14, weight: FontWeight.w800)),
             const SizedBox(height: 3),
             Text(body, style: T.ui(15, weight: FontWeight.w500, height: 1.45)),
-            if (foot != null) ...[
+            if (f != null) ...[
               const SizedBox(height: 4),
-              Text(foot!, style: T.ui(12, color: C.muted)),
+              Text(f, style: T.ui(12, color: C.muted)),
             ],
           ]),
         ),

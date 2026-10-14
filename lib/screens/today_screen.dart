@@ -36,10 +36,13 @@ class TodayScreen extends StatelessWidget {
     final cond = ins.condition(score);
     final top = MediaQuery.of(context).padding.top;
     final brief = app.brief;
-    final fresh = brief != null && brief.dataKey == app.dataKey ? brief : null;
+    final fresh = (brief != null && brief.dataKey == app.dataKey) ? brief : null;
     if (app.aiReady && fresh == null && !app.briefLoading && app.briefError == null && ins.today != null) {
       WidgetsBinding.instance.addPostFrameCallback((_) => app.refreshBrief());
     }
+    final tipTitle = fresh?.tipTitle ?? '';
+    final tipBody = fresh?.tipBody ?? '';
+    final tipModel = fresh?.model;
 
     return RefreshIndicator(
       color: C.crimson,
@@ -136,24 +139,24 @@ class TodayScreen extends StatelessWidget {
               const _NightRows(),
               const SizedBox(height: 24),
               const _TodaySoFar(),
-              if (fresh != null && fresh.tipBody.isNotEmpty) ...[
+              if (tipBody.isNotEmpty) ...[
                 const SizedBox(height: 32),
-                Kicker('One thing for today', color: C.crimson),
+                const Kicker('One thing for today', color: C.crimson),
                 const SizedBox(height: 8),
                 PaperCard(
                   color: C.sun,
                   border: false,
                   child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    Text(fresh.tipTitle, style: T.display(30)),
+                    Text(tipTitle, style: T.display(30)),
                     const SizedBox(height: 6),
-                    Text(fresh.tipBody, style: T.serif(16)),
+                    Text(tipBody, style: T.serif(16)),
                     const SizedBox(height: 10),
-                    SourceBadge(gemini: true, model: fresh.model),
+                    SourceBadge(gemini: true, model: tipModel),
                   ]),
                 ),
               ],
               const SizedBox(height: 32),
-              Kicker('Try tonight', color: C.crimson),
+              const Kicker('Try tonight', color: C.crimson),
               const SizedBox(height: 8),
               ExperimentCard(id: bestExperiment(ins), dark: true),
               const _DiscoveryOfTheDay(),
@@ -174,17 +177,18 @@ class _DataBanner extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final app = AppScope.of(context);
-    final children = <Widget>[];
+    final err = app.syncError;
+    Widget? child;
     if (app.syncing) {
-      children.add(Row(children: [
+      child = Row(children: [
         const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: C.crimson)),
         const SizedBox(width: 10),
         Text('Syncing Health Connect…', style: T.ui(14, color: C.muted)),
-      ]));
-    } else if (app.syncError != null) {
-      children.add(ErrorNote(message: app.syncError!, onRetry: () => app.sync(force: true), actionLabel: 'Sync again'));
+      ]);
+    } else if (err != null) {
+      child = ErrorNote(message: err, onRetry: () => app.sync(force: true), actionLabel: 'Sync again');
     } else if (app.isSample) {
-      children.add(PaperCard(
+      child = PaperCard(
         color: const Color(0x14172767),
         border: false,
         padding: const EdgeInsets.all(14),
@@ -194,16 +198,16 @@ class _DataBanner extends StatelessWidget {
           const SizedBox(width: 10),
           Expanded(child: Text('You are exploring sample data. Connect Health Connect in Me to see yours.', style: T.ui(14, color: C.navy, height: 1.4))),
         ]),
-      ));
+      );
     } else if (app.insights.isEmpty) {
-      children.add(ErrorNote(
+      child = ErrorNote(
         message: 'No readings yet. Make sure your tracker and meal app sync to Health Connect, then pull down to refresh.',
         onRetry: () => app.sync(force: true),
         actionLabel: 'Sync now',
-      ));
+      );
     }
-    if (children.isEmpty) return const SizedBox.shrink();
-    return Padding(padding: const EdgeInsets.only(bottom: 18), child: Column(children: children));
+    if (child == null) return const SizedBox.shrink();
+    return Padding(padding: const EdgeInsets.only(bottom: 18), child: child);
   }
 }
 
@@ -216,6 +220,7 @@ class _ForecasterNote extends StatelessWidget {
     final app = AppScope.of(context);
     final b = fresh ? app.brief : null;
     final text = b != null ? (app.depth == 'nerdy' ? b.noteNerdy : b.noteSimple) : app.insights.forecasterNote(app.depth);
+    final err = app.briefError;
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Row(children: [
         const Expanded(child: Kicker('From the forecaster', color: C.crimson)),
@@ -235,9 +240,9 @@ class _ForecasterNote extends StatelessWidget {
         ])
       else
         SourceBadge(gemini: b != null, model: b?.model),
-      if (app.briefError != null) ...[
+      if (err != null) ...[
         const SizedBox(height: 10),
-        ErrorNote(message: app.briefError!, onRetry: () => app.refreshBrief(force: true)),
+        ErrorNote(message: err, onRetry: () => app.refreshBrief(force: true)),
       ],
       if (!app.hasKey) ...[
         const SizedBox(height: 10),
@@ -269,22 +274,29 @@ class _NightRows extends StatelessWidget {
     final b = ins.baseline(key);
     switch (key) {
       case 'sleepMin':
-        if (!b.ok) return 'Asleep ${fmtDur(v)}.';
-        final gap = (v - b.mean).round();
-        if (gap < -10) return 'Asleep ${fmtDur(v)}. About ${-gap} min short of your usual.';
-        if (gap > 10) return 'Asleep ${fmtDur(v)}. $gap min more than usual.';
-        return 'Asleep ${fmtDur(v)}. Right around your usual.';
+        {
+          if (!b.ok) return 'Asleep ${fmtDur(v)}.';
+          final gap = (v - b.mean).round();
+          if (gap < -10) return 'Asleep ${fmtDur(v)}. About ${-gap} min short of your usual.';
+          if (gap > 10) return 'Asleep ${fmtDur(v)}. $gap min more than usual.';
+          return 'Asleep ${fmtDur(v)}. Right around your usual.';
+        }
       case 'deep':
         return b.ok ? 'Your repair shift ran ${v.round()} min. Usually ${b.mean.round()}.' : 'Your repair shift ran ${v.round()} min.';
       case 'hrv':
-        if (!b.ok) return 'Calm reserve read ${v.round()} ms.';
-        if (v < b.mean - b.sd * 0.5) return 'Calm reserve dipped. Your body worked through the night instead of resting.';
-        if (v > b.mean + b.sd * 0.5) return 'Calm reserve is up. You recovered well.';
-        return 'Calm reserve is steady, right where you like it.';
+        {
+          if (!b.ok) return 'Calm reserve read ${v.round()} ms.';
+          if (v < b.mean - b.sd * 0.5) return 'Calm reserve dipped. Your body worked through the night instead of resting.';
+          if (v > b.mean + b.sd * 0.5) return 'Calm reserve is up. You recovered well.';
+          return 'Calm reserve is steady, right where you like it.';
+        }
       case 'rhr':
-        if (!b.ok) return 'Heart idled at ${v.round()} bpm.';
-        final d = v - b.mean;
-        return 'Heart idled at ${v.round()} bpm${d >= 2 ? ', a few beats busier than normal' : d <= -2 ? ', calmer than usual' : ', right on your normal'}.';
+        {
+          if (!b.ok) return 'Heart idled at ${v.round()} bpm.';
+          final d = v - b.mean;
+          final tail = d >= 2 ? ', a few beats busier than normal' : (d <= -2 ? ', calmer than usual' : ', right on your normal');
+          return 'Heart idled at ${v.round()} bpm$tail.';
+        }
     }
     return '';
   }
@@ -293,20 +305,24 @@ class _NightRows extends StatelessWidget {
   Widget build(BuildContext context) {
     final app = AppScope.of(context);
     final ins = app.insights;
-    final t = ins.today;
+    final day = ins.today;
     const keys = ['sleepMin', 'deep', 'hrv', 'rhr'];
     const units = {'sleepMin': 'asleep', 'deep': 'min deep', 'hrv': 'ms · HRV', 'rhr': 'bpm resting'};
-    final rows = keys.where((k) => t?.value(k) != null).toList();
-    if (rows.isEmpty) {
+    if (day == null || keys.every((k) => day.value(k) == null)) {
       return Padding(
         padding: const EdgeInsets.symmetric(vertical: 12),
         child: Text('No overnight readings for last night. Wear your tracker to bed and sync in the morning.', style: T.serif(16, color: C.muted)),
       );
     }
+    final rows = <(String, double)>[];
+    for (final k in keys) {
+      final v = day.value(k);
+      if (v != null) rows.add((k, v));
+    }
     return Column(children: [
       for (var i = 0; i < rows.length; i++)
         Press(
-          onTap: () => Navigator.of(context).push(slideRoute(MetricScreen(metricKey: rows[i]))),
+          onTap: () => Navigator.of(context).push(slideRoute(MetricScreen(metricKey: rows[i].$1))),
           child: Container(
             padding: const EdgeInsets.symmetric(vertical: 16),
             decoration: BoxDecoration(border: i == 0 ? null : const Border(top: BorderSide(color: C.rule))),
@@ -317,17 +333,17 @@ class _NightRows extends StatelessWidget {
                   FittedBox(
                     fit: BoxFit.scaleDown,
                     alignment: Alignment.centerLeft,
-                    child: Text(fmtValue(rows[i], t!.value(rows[i])), style: T.display(40)),
+                    child: Text(fmtValue(rows[i].$1, rows[i].$2), style: T.display(40)),
                   ),
-                  Text(units[rows[i]]!.toUpperCase(), style: T.kicker(size: 11)),
+                  Text(units[rows[i].$1]!.toUpperCase(), style: T.kicker(size: 11)),
                 ]),
               ),
               const SizedBox(width: 12),
               Expanded(
                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Text(_line(ins, rows[i], t.value(rows[i])!), style: T.ui(15, weight: FontWeight.w500, height: 1.45)),
+                  Text(_line(ins, rows[i].$1, rows[i].$2), style: T.ui(15, weight: FontWeight.w500, height: 1.45)),
                   const SizedBox(height: 6),
-                  StatusChip(ins.status(rows[i])),
+                  StatusChip(ins.status(rows[i].$1)),
                 ]),
               ),
               const Icon(Icons.chevron_right_rounded, color: C.muted),
@@ -393,11 +409,12 @@ class _DiscoveryOfTheDay extends StatelessWidget {
   Widget build(BuildContext context) {
     final app = AppScope.of(context);
     final b = app.brief;
-    final fresh = b != null && b.dataKey == app.dataKey;
+    final fb = (b != null && b.dataKey == app.dataKey) ? b : null;
+    final aiHeads = fb == null ? const <String>[] : fb.discoveries.map((d) => d.head).toList();
     final local = app.insights.discoveries();
-    final head = fresh && b.discoveries.isNotEmpty ? b.discoveries.first.head : (local.isNotEmpty ? local.first.head : null);
+    final String? head = aiHeads.isNotEmpty ? aiHeads.first : (local.isNotEmpty ? local.first.head : null);
     if (head == null) return const SizedBox.shrink();
-    final count = (fresh ? b.discoveries.length : 0) + local.length;
+    final count = aiHeads.length + local.length;
     return Padding(
       padding: const EdgeInsets.only(top: 32),
       child: PaperCard(
@@ -428,7 +445,8 @@ class _Footer extends StatelessWidget {
   Widget build(BuildContext context) {
     final app = AppScope.of(context);
     final ins = app.insights;
-    final y = ins.today == null ? null : ins.prevOf(ins.today!);
+    final t = ins.today;
+    final y = t == null ? null : ins.prevOf(t);
     final ls = app.lastSync;
     final line1 = app.isSample
         ? 'Sample data · nothing leaves this phone'
@@ -436,9 +454,10 @@ class _Footer extends StatelessWidget {
             ? 'Not synced yet'
             : 'Synced ${fmtTime(ls)} · Health Connect';
     final dinner = y?.dinnerName;
+    final at = y?.lastMealMin;
     return Center(
       child: Text(
-        dinner != null && y?.lastMealMin != null ? '$line1\nYesterday\'s dinner: $dinner, ${fmtClock(y!.lastMealMin!)}' : line1,
+        dinner != null && at != null ? '$line1\nYesterday\'s dinner: $dinner, ${fmtClock(at)}' : line1,
         textAlign: TextAlign.center,
         style: T.ui(12, color: C.muted, weight: FontWeight.w500, height: 1.5),
       ),
